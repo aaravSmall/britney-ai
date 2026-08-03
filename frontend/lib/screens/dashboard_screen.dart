@@ -136,7 +136,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   _error!,
                   textAlign: TextAlign.center,
-                  style: t.bodyMedium?.copyWith(color: AppTheme.textSecondary),
+                  style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
                 const SizedBox(height: 16),
                 FilledButton(onPressed: _load, child: const Text('Try again')),
@@ -178,7 +178,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             Text(
               _greeting(),
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ],
         ),
@@ -222,7 +222,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Text(
                           auth.displayEmail!,
                           style: t.bodySmall?.copyWith(
-                            color: AppTheme.textSecondary,
+                            color: AppTheme.textSecondaryOf(context),
                           ),
                         ),
                     ],
@@ -233,7 +233,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const SizedBox(height: 8),
             Text(
               'Paper portfolio — simulated execution, illustrative only.',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
             const SizedBox(height: 16),
             Text(
@@ -282,7 +282,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 subtitle: Text(
                   'When on, trade requests can use simulated execution.',
                   style: t.bodySmall?.copyWith(
-                    color: AppTheme.textSecondary,
+                    color: AppTheme.textSecondaryOf(context),
                   ),
                 ),
                 value: _auto,
@@ -304,7 +304,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   '${holdings.length} positions',
                   style: t.bodySmall?.copyWith(
-                    color: AppTheme.textSecondary,
+                    color: AppTheme.textSecondaryOf(context),
                   ),
                 ),
               ],
@@ -350,7 +350,7 @@ class _SummaryCard extends StatelessWidget {
             Text(
               'Total value',
               style: t.labelLarge?.copyWith(
-                color: AppTheme.textSecondary,
+                color: AppTheme.textSecondaryOf(context),
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -365,20 +365,20 @@ class _SummaryCard extends StatelessWidget {
             const SizedBox(height: 6),
             Text(
               range.description,
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
             const SizedBox(height: 8),
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.account_balance_wallet_outlined,
                   size: 16,
-                  color: AppTheme.textSecondary,
+                  color: AppTheme.textSecondaryOf(context),
                 ),
                 const SizedBox(width: 6),
                 Text(
                   'Cash \$${cash.toStringAsFixed(2)}',
-                  style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+                  style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
                 const SizedBox(width: 14),
                 Container(
@@ -455,20 +455,20 @@ class _HoldingTile extends StatelessWidget {
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         leading: CircleAvatar(
-          backgroundColor: AppTheme.surface2,
+          backgroundColor: AppTheme.surface2Of(context),
           child: Text(
             sym.length >= 2 ? sym.substring(0, 2) : sym,
-            style: const TextStyle(
+            style: TextStyle(
               fontWeight: FontWeight.w700,
               fontSize: 13,
-              color: AppTheme.textPrimary,
+              color: AppTheme.textPrimaryOf(context),
             ),
           ),
         ),
         title: Text(sym, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text(
           '${h['asset_type']} · ${qty == qty.roundToDouble() ? qty.toStringAsFixed(0) : qty.toStringAsFixed(4)} shares',
-          style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+          style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Text(
           mv != null ? '\$${(mv as num).toStringAsFixed(2)}' : '—',

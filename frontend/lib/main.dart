@@ -7,6 +7,7 @@ import 'firebase_options.dart';
 import 'router/app_router.dart';
 import 'services/api_service.dart';
 import 'services/auth_controller.dart';
+import 'services/theme_controller.dart';
 import 'theme/app_theme.dart';
 
 void main() async {
@@ -32,6 +33,7 @@ class BritneyApp extends StatefulWidget {
 
 class _BritneyAppState extends State<BritneyApp> {
   late final AuthController _auth = AuthController();
+  late final ThemeController _theme = ThemeController();
   late final GoRouter _router = createRouter(_auth);
 
   @override
@@ -39,15 +41,21 @@ class _BritneyAppState extends State<BritneyApp> {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<AuthController>.value(value: _auth),
+        ChangeNotifierProvider<ThemeController>.value(value: _theme),
         ProxyProvider<AuthController, ApiService>(
           update: (_, auth, __) => ApiService(getIdToken: auth.getIdToken),
         ),
       ],
-      child: MaterialApp.router(
-        title: 'britney.ai',
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.dark(),
-        routerConfig: _router,
+      child: AnimatedBuilder(
+        animation: _theme,
+        builder: (context, _) => MaterialApp.router(
+          title: 'britney.ai',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.light(),
+          darkTheme: AppTheme.dark(),
+          themeMode: _theme.mode,
+          routerConfig: _router,
+        ),
       ),
     );
   }

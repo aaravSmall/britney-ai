@@ -64,7 +64,7 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
             ),
             Text(
               'Personalized picks & reasoning',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ],
         ),
@@ -103,7 +103,7 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
               Text(
                 _error!,
                 textAlign: TextAlign.center,
-                style: t.bodyMedium?.copyWith(color: AppTheme.textSecondary),
+                style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
               ),
               const SizedBox(height: 16),
               FilledButton(onPressed: _load, child: const Text('Try again')),
@@ -141,7 +141,7 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
                     child: Text(
                       'AI-generated allocation based on your risk profile — educational only, not financial advice.',
                       style: t.bodySmall?.copyWith(
-                        color: AppTheme.textSecondary,
+                        color: AppTheme.textSecondaryOf(context),
                         height: 1.4,
                       ),
                     ),
@@ -176,7 +176,7 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
           Text(
             data['disclaimer'] as String? ?? '',
             style: t.bodySmall?.copyWith(
-              color: AppTheme.textSecondary,
+              color: AppTheme.textSecondaryOf(context),
               height: 1.4,
             ),
           ),
@@ -235,7 +235,7 @@ class _AssetCard extends StatelessWidget {
             Text(
               a['rationale'] as String? ?? '',
               style: t.bodyMedium?.copyWith(
-                color: AppTheme.textSecondary,
+                color: AppTheme.textSecondaryOf(context),
                 height: 1.4,
               ),
             ),

@@ -12,6 +12,8 @@ import '../theme/app_theme.dart';
 
 /// Builds router with [auth] so redirects react to sign-in without BuildContext.
 GoRouter createRouter(AuthController auth) {
+  final tabDirection = _TabDirection();
+
   return GoRouter(
     refreshListenable: auth,
     initialLocation: '/login',
@@ -35,20 +37,28 @@ GoRouter createRouter(AuthController auth) {
       ShellRoute(
         builder: (context, state, child) => _MainShell(child: child),
         routes: [
-          GoRoute(
+          _tabRoute(
             path: '/home',
+            index: 0,
+            tabDirection: tabDirection,
             builder: (_, __) => const DashboardScreen(),
           ),
-          GoRoute(
+          _tabRoute(
             path: '/recommendations',
+            index: 1,
+            tabDirection: tabDirection,
             builder: (_, __) => const RecommendationsScreen(),
           ),
-          GoRoute(
+          _tabRoute(
             path: '/chat',
+            index: 2,
+            tabDirection: tabDirection,
             builder: (_, __) => const ChatScreen(),
           ),
-          GoRoute(
+          _tabRoute(
             path: '/account',
+            index: 3,
+            tabDirection: tabDirection,
             builder: (_, __) => const AccountScreen(),
           ),
         ],
@@ -57,19 +67,62 @@ GoRouter createRouter(AuthController auth) {
   );
 }
 
-class _MainShell extends StatefulWidget {
+/// Tracks the last-visited bottom-tab index across navigations so a route's
+/// [pageBuilder] knows which way to slide when it's built.
+class _TabDirection {
+  int lastIndex = 0;
+}
+
+/// A bottom-tab route that slides in from the right when moving to a tab
+/// further right, and from the left when moving to a tab further left.
+///
+/// This drives the transition through go_router's own nested [Navigator]
+/// (which [ShellRoute] creates for its sub-routes) via [CustomTransitionPage],
+/// instead of layering a second, independent [AnimatedSwitcher] on top of it.
+/// Doing both at once was the cause of the previous stutter: the Navigator's
+/// own page-replace transition and the hand-rolled outer one were fighting
+/// over the same frames, and the outer one force-recreated the whole nested
+/// Navigator on every tab switch (new `ValueKey`), cutting its in-flight
+/// transition off mid-animation.
+GoRoute _tabRoute({
+  required String path,
+  required int index,
+  required _TabDirection tabDirection,
+  required Widget Function(BuildContext, GoRouterState) builder,
+}) {
+  return GoRoute(
+    path: path,
+    pageBuilder: (context, state) {
+      final forward = index >= tabDirection.lastIndex;
+      tabDirection.lastIndex = index;
+      return CustomTransitionPage(
+        key: state.pageKey,
+        transitionDuration: const Duration(milliseconds: 280),
+        reverseTransitionDuration: const Duration(milliseconds: 280),
+        child: RepaintBoundary(child: builder(context, state)),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          final slide = Tween<Offset>(
+            begin: forward ? const Offset(1.0, 0.0) : const Offset(-1.0, 0.0),
+            end: Offset.zero,
+          ).animate(curved);
+          return FadeTransition(
+            opacity: curved,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
+      );
+    },
+  );
+}
+
+class _MainShell extends StatelessWidget {
   const _MainShell({required this.child});
 
   final Widget child;
-
-  @override
-  State<_MainShell> createState() => _MainShellState();
-}
-
-class _MainShellState extends State<_MainShell> {
-  int _lastIndex = 0;
-  bool _didSyncIndex = false;
-  bool _forward = true;
 
   static int _tabIndex(String path) {
     if (path.startsWith('/recommendations')) return 1;
@@ -79,59 +132,15 @@ class _MainShellState extends State<_MainShell> {
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_didSyncIndex) return;
-    _lastIndex = _tabIndex(GoRouterState.of(context).uri.path);
-    _didSyncIndex = true;
-  }
-
-  // Kept as a stable method tear-off (not an inline closure) so its identity
-  // doesn't change across rebuilds. AnimatedSwitcher re-triggers the
-  // transition for in-flight entries whenever `transitionBuilder` changes
-  // identity, which was snapping the slide direction mid-animation.
-  Widget _buildTransition(Widget child, Animation<double> animation) {
-    final curved = CurvedAnimation(
-      parent: animation,
-      curve: Curves.easeOutCubic,
-    );
-    final slide = Tween<Offset>(
-      begin: _forward ? const Offset(1.0, 0.0) : const Offset(-1.0, 0.0),
-      end: Offset.zero,
-    ).animate(curved);
-    return FadeTransition(
-      opacity: curved,
-      child: SlideTransition(position: slide, child: child),
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
     final loc = GoRouterState.of(context).uri.path;
     final index = _tabIndex(loc);
-    if (index != _lastIndex) {
-      // Right-of-current tabs slide in from the right; left-of-current tabs
-      // slide in from the left. Updated synchronously (no setState/post-frame
-      // delay) so the direction is frozen for the whole transition.
-      _forward = index > _lastIndex;
-      _lastIndex = index;
-    }
-
-    final animatedBody = AnimatedSwitcher(
-      duration: const Duration(milliseconds: 280),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeOutCubic,
-      transitionBuilder: _buildTransition,
-      child: KeyedSubtree(
-        key: ValueKey<String>(loc),
-        child: RepaintBoundary(child: widget.child),
-      ),
-    );
 
     return Scaffold(
       body: DecoratedBox(
-        decoration: BoxDecoration(gradient: AppTheme.scaffoldGradient),
-        child: animatedBody,
+        decoration:
+            BoxDecoration(gradient: AppTheme.scaffoldGradientOf(context)),
+        child: child,
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,

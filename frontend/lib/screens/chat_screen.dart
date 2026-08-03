@@ -87,7 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             Text(
               'Investing Q&A',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ],
         ),
@@ -129,7 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           Text(
                             'Ask about allocations, risk, or how to get started — answers are educational, not financial advice.',
                             style: t.bodyMedium?.copyWith(
-                              color: AppTheme.textSecondary,
+                              color: AppTheme.textSecondaryOf(context),
                               height: 1.45,
                             ),
                             textAlign: TextAlign.center,
@@ -171,7 +171,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 decoration: BoxDecoration(
                                   color: mine
                                       ? AppTheme.accent.withValues(alpha: 0.14)
-                                      : AppTheme.surface,
+                                      : AppTheme.surfaceOf(context),
                                   borderRadius: BorderRadius.only(
                                     topLeft: const Radius.circular(18),
                                     topRight: const Radius.circular(18),
@@ -181,7 +181,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                   border: Border.all(
                                     color: mine
                                         ? AppTheme.accent.withValues(alpha: 0.35)
-                                        : AppTheme.borderSubtle,
+                                        : AppTheme.borderSubtleOf(context),
                                   ),
                                 ),
                                 child: Padding(
@@ -198,13 +198,13 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                             if (mine) ...[
                               const SizedBox(width: 8),
-                              const CircleAvatar(
+                              CircleAvatar(
                                 radius: 16,
-                                backgroundColor: AppTheme.surface2,
+                                backgroundColor: AppTheme.surface2Of(context),
                                 child: Icon(
                                   Icons.person_rounded,
                                   size: 16,
-                                  color: AppTheme.textSecondary,
+                                  color: AppTheme.textSecondaryOf(context),
                                 ),
                               ),
                             ],
@@ -215,10 +215,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
           ),
           if (_loading)
-            const LinearProgressIndicator(
+            LinearProgressIndicator(
               minHeight: 2,
               color: AppTheme.accent,
-              backgroundColor: AppTheme.surface2,
+              backgroundColor: AppTheme.surface2Of(context),
             ),
           SafeArea(
             top: false,
@@ -229,7 +229,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 children: [
                   Expanded(
                     child: Material(
-                      color: AppTheme.surface2,
+                      color: AppTheme.surface2Of(context),
                       borderRadius: BorderRadius.circular(16),
                       child: TextField(
                         controller: _controller,

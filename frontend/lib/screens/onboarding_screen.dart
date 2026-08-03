@@ -47,8 +47,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
 
+    // This route sits outside the ShellRoute's gradient-backed shell, so
+    // (unlike the tab screens) it must not be transparent — nothing dark is
+    // painted behind it, which was letting the raw white canvas show through.
     return Scaffold(
-      backgroundColor: Colors.transparent,
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -59,7 +61,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             ),
             Text(
               'Step 1 of 1',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ],
         ),
@@ -83,7 +85,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     child: Text(
                       'We use this to tune recommendations — not to sell you anything.',
                       style: t.bodyMedium?.copyWith(
-                        color: AppTheme.textSecondary,
+                        color: AppTheme.textSecondaryOf(context),
                         height: 1.45,
                       ),
                     ),

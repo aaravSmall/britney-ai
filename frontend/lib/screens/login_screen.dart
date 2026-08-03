@@ -15,7 +15,7 @@ class LoginScreen extends StatelessWidget {
 
     return Scaffold(
       body: DecoratedBox(
-        decoration: BoxDecoration(gradient: AppTheme.scaffoldGradient),
+        decoration: BoxDecoration(gradient: AppTheme.scaffoldGradientOf(context)),
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -66,7 +66,7 @@ class LoginScreen extends StatelessWidget {
                   'Your AI investing copilot — no minimums, no paywalls.',
                   textAlign: TextAlign.center,
                   style: t.bodyLarge?.copyWith(
-                    color: AppTheme.textSecondary,
+                    color: AppTheme.textSecondaryOf(context),
                     height: 1.45,
                   ),
                 ),
@@ -106,7 +106,7 @@ class LoginScreen extends StatelessWidget {
                   'Demo uses AUTH_DISABLED on the API. No real Google token.',
                   textAlign: TextAlign.center,
                   style: t.bodySmall?.copyWith(
-                    color: AppTheme.textSecondary,
+                    color: AppTheme.textSecondaryOf(context),
                   ),
                 ),
                 const SizedBox(height: 24),

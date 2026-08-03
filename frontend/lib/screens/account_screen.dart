@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../services/auth_controller.dart';
+import '../services/theme_controller.dart';
 import '../theme/app_theme.dart';
 
 class AccountScreen extends StatelessWidget {
@@ -25,7 +26,7 @@ class AccountScreen extends StatelessWidget {
             ),
             Text(
               'Profile & security',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ],
         ),
@@ -67,7 +68,7 @@ class AccountScreen extends StatelessWidget {
                         Text(
                           auth.displayEmail ?? '',
                           style: t.bodySmall?.copyWith(
-                            color: AppTheme.textSecondary,
+                            color: AppTheme.textSecondaryOf(context),
                           ),
                         ),
                       ],
@@ -79,33 +80,93 @@ class AccountScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            'Preferences',
+            'Profile',
             style: t.titleSmall?.copyWith(
               fontWeight: FontWeight.w600,
-              color: AppTheme.textSecondary,
+              color: AppTheme.textSecondaryOf(context),
             ),
           ),
           const SizedBox(height: 8),
           Card(
+            child: ListTile(
+              leading: const Icon(Icons.tune_rounded),
+              title: const Text('Investment profile'),
+              subtitle: Text(
+                'Risk, goals, and time horizon',
+                style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+              ),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => context.push('/onboarding'),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            'Settings',
+            style: t.titleSmall?.copyWith(
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textSecondaryOf(context),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.palette_outlined,
+                          color: AppTheme.textSecondaryOf(context)),
+                      const SizedBox(width: 16),
+                      Text(
+                        'Appearance',
+                        style:
+                            t.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const SizedBox(
+                    width: double.infinity,
+                    child: _AppearanceSelector(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Card(
             child: Column(
               children: [
-                ListTile(
-                  leading: const Icon(Icons.tune_rounded),
-                  title: const Text('Investment profile'),
-                  subtitle: Text(
-                    'Risk, goals, and time horizon',
-                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
-                  ),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => context.push('/onboarding'),
-                ),
-                const Divider(height: 1),
                 ListTile(
                   leading: const Icon(Icons.notifications_outlined),
                   title: const Text('Notifications'),
                   subtitle: Text(
                     'Coming soon',
-                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () {},
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.lock_outline_rounded),
+                  title: const Text('App lock'),
+                  subtitle: Text(
+                    'Coming soon',
+                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () {},
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.attach_money_rounded),
+                  title: const Text('Currency'),
+                  subtitle: Text(
+                    'USD',
+                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () {},
@@ -118,7 +179,7 @@ class AccountScreen extends StatelessWidget {
             'Session',
             style: t.titleSmall?.copyWith(
               fontWeight: FontWeight.w600,
-              color: AppTheme.textSecondary,
+              color: AppTheme.textSecondaryOf(context),
             ),
           ),
           const SizedBox(height: 8),
@@ -137,11 +198,42 @@ class AccountScreen extends StatelessWidget {
           Center(
             child: Text(
               'britney.ai v0.1.0',
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondary),
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AppearanceSelector extends StatelessWidget {
+  const _AppearanceSelector();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = context.watch<ThemeController>();
+    return SegmentedButton<ThemeMode>(
+      segments: const [
+        ButtonSegment(
+          value: ThemeMode.system,
+          icon: Icon(Icons.brightness_auto_rounded, size: 18),
+          label: Text('Auto'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.light,
+          icon: Icon(Icons.light_mode_rounded, size: 18),
+          label: Text('Light'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.dark,
+          icon: Icon(Icons.dark_mode_rounded, size: 18),
+          label: Text('Dark'),
+        ),
+      ],
+      selected: {theme.mode},
+      showSelectedIcon: false,
+      onSelectionChanged: (s) => theme.setMode(s.first),
     );
   }
 }
