@@ -1,0 +1,9 @@
+{
+  "name": "britney.ai",
+  "short_name": "britney.ai",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0B0E11",
+  "theme_color": "#00C805",
+  "description": "AI-powered investing assistant"
+}

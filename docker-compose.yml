@@ -1,0 +1,16 @@
+# Local PostgreSQL for britney.ai development
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: britney-postgres
+    environment:
+      POSTGRES_USER: britney
+      POSTGRES_PASSWORD: britney_dev
+      POSTGRES_DB: britney
+    ports:
+      - "5432:5432"
+    volumes:
+      - britney_pg_data:/var/lib/postgresql/data
+
+volumes:
+  britney_pg_data:

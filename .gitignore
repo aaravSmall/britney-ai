@@ -1,0 +1,28 @@
+# Env & secrets
+.env
+*.pem
+**/google-services.json
+**/GoogleService-Info.plist
+
+# Python
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.db
+*.sqlite3
+
+# Flutter
+frontend/.dart_tool/
+frontend/build/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
