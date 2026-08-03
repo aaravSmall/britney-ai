@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../services/auth_controller.dart';
 import '../services/theme_controller.dart';
+import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
 
 class AccountScreen extends StatelessWidget {
@@ -131,6 +132,24 @@ class AccountScreen extends StatelessWidget {
                     width: double.infinity,
                     child: _AppearanceSelector(),
                   ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Icon(Icons.schedule_rounded,
+                          color: AppTheme.textSecondaryOf(context)),
+                      const SizedBox(width: 16),
+                      Text(
+                        'Time format',
+                        style:
+                            t.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const SizedBox(
+                    width: double.infinity,
+                    child: _TimeFormatSelector(),
+                  ),
                 ],
               ),
             ),
@@ -234,6 +253,24 @@ class _AppearanceSelector extends StatelessWidget {
       selected: {theme.mode},
       showSelectedIcon: false,
       onSelectionChanged: (s) => theme.setMode(s.first),
+    );
+  }
+}
+
+class _TimeFormatSelector extends StatelessWidget {
+  const _TimeFormatSelector();
+
+  @override
+  Widget build(BuildContext context) {
+    final timeFormat = context.watch<TimeFormatController>();
+    return SegmentedButton<bool>(
+      segments: const [
+        ButtonSegment(value: false, label: Text('12-hour')),
+        ButtonSegment(value: true, label: Text('24-hour')),
+      ],
+      selected: {timeFormat.use24Hour},
+      showSelectedIcon: false,
+      onSelectionChanged: (s) => timeFormat.setUse24Hour(s.first),
     );
   }
 }
