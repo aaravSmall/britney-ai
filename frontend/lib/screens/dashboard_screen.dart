@@ -9,6 +9,7 @@ import '../data/chart_kind.dart';
 import '../data/chart_range.dart';
 import '../services/api_service.dart';
 import '../services/auth_controller.dart';
+import '../services/portfolio_bus.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
 
@@ -70,13 +71,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _error;
   Map<String, dynamic>? _dashboard;
   bool _started = false;
+  PortfolioBus? _portfolioBus;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final bus = context.read<PortfolioBus>();
+    if (!identical(_portfolioBus, bus)) {
+      _portfolioBus?.removeListener(_onPortfolioTraded);
+      _portfolioBus = bus..addListener(_onPortfolioTraded);
+    }
     if (_started) return;
     _started = true;
     _load();
+  }
+
+  // A trade filled elsewhere (recommendations screen) — refetch so cash and
+  // holdings shown here stay in sync.
+  void _onPortfolioTraded() {
+    if (mounted) _load();
+  }
+
+  @override
+  void dispose() {
+    _portfolioBus?.removeListener(_onPortfolioTraded);
+    super.dispose();
   }
 
   Future<void> _load() async {

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_service.dart';
+import '../services/portfolio_bus.dart';
 import '../theme/app_theme.dart';
 
 class RecommendationsScreen extends StatefulWidget {
@@ -46,6 +47,90 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<void> _trade(Map<String, dynamic> asset, String side) async {
+    final symbol = asset['symbol'] as String;
+    final assetType = asset['asset_type'] as String? ?? 'stock';
+    final qty = await _promptQuantity(symbol: symbol, side: side);
+    if (qty == null || !mounted) return;
+
+    final api = context.read<ApiService>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final res = await api.post('/trading/trade', {
+        'symbol': symbol,
+        'asset_type': assetType,
+        'side': side,
+        'quantity': qty,
+        'simulate_only': true,
+      });
+      if (!mounted) return;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        context.read<PortfolioBus>().notifyTraded();
+        messenger.showSnackBar(
+          SnackBar(content: Text(body['message'] as String? ?? 'Trade filled')),
+        );
+      } else {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(_errorDetail(res.body)),
+            backgroundColor: AppTheme.danger,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('Network error: $e'), backgroundColor: AppTheme.danger),
+      );
+    }
+  }
+
+  String _errorDetail(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['detail'] != null) {
+        return decoded['detail'].toString();
+      }
+    } catch (_) {
+      // Fall through to generic message below.
+    }
+    return 'Trade failed';
+  }
+
+  Future<double?> _promptQuantity({
+    required String symbol,
+    required String side,
+  }) {
+    final controller = TextEditingController(text: '1');
+    final label = side == 'buy' ? 'Buy' : 'Sell';
+    return showDialog<double>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('$label $symbol'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'Quantity'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final qty = double.tryParse(controller.text);
+              Navigator.pop(dialogContext, (qty != null && qty > 0) ? qty : null);
+            },
+            child: Text(label),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -166,7 +251,9 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
             style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 10),
-          ...assets.map((e) => _AssetCard(e)),
+          ...assets.map(
+            (e) => _AssetCard(e, onTrade: (side) => _trade(e, side)),
+          ),
           const SizedBox(height: 16),
           Text(
             data['plain_english_reasoning'] as String? ?? '',
@@ -187,9 +274,10 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
 }
 
 class _AssetCard extends StatelessWidget {
-  const _AssetCard(this.a);
+  const _AssetCard(this.a, {required this.onTrade});
 
   final Map<String, dynamic> a;
+  final void Function(String side) onTrade;
 
   @override
   Widget build(BuildContext context) {
@@ -238,6 +326,24 @@ class _AssetCard extends StatelessWidget {
                 color: AppTheme.textSecondaryOf(context),
                 height: 1.4,
               ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => onTrade('sell'),
+                    child: const Text('Sell'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => onTrade('buy'),
+                    child: const Text('Buy'),
+                  ),
+                ),
+              ],
             ),
           ],
         ),

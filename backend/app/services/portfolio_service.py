@@ -10,6 +10,69 @@ from app.schemas.dashboard import DashboardResponse, HoldingOut, PerformancePoin
 from app.services import market_data
 
 
+class InsufficientFundsError(Exception):
+    pass
+
+
+class InsufficientHoldingsError(Exception):
+    pass
+
+
+def record_trade_fill(
+    db: Session,
+    user: User,
+    symbol: str,
+    asset_type: str,
+    side: str,
+    quantity: float,
+    price: float,
+) -> None:
+    """Apply a filled paper trade to the user's cash and holdings."""
+    holding = next(
+        (h for h in user.holdings if h.symbol == symbol and h.asset_type == asset_type),
+        None,
+    )
+    cost = quantity * price
+
+    if side == "buy":
+        if user.cash_balance < cost:
+            raise InsufficientFundsError(
+                f"Insufficient cash: need ${cost:,.2f}, have ${user.cash_balance:,.2f}"
+            )
+        user.cash_balance -= cost
+        if holding:
+            new_qty = holding.quantity + quantity
+            holding.avg_cost = (
+                holding.avg_cost * holding.quantity + cost
+            ) / new_qty
+            holding.quantity = new_qty
+            holding.last_price = price
+        else:
+            holding = PortfolioHolding(
+                user_id=user.id,
+                symbol=symbol,
+                asset_type=asset_type,
+                quantity=quantity,
+                avg_cost=price,
+                last_price=price,
+            )
+            db.add(holding)
+    else:  # sell
+        if not holding or holding.quantity < quantity:
+            have = holding.quantity if holding else 0.0
+            raise InsufficientHoldingsError(
+                f"Insufficient {symbol}: trying to sell {quantity}, hold {have}"
+            )
+        user.cash_balance += cost
+        holding.quantity -= quantity
+        holding.last_price = price
+        if holding.quantity <= 1e-9:
+            db.delete(holding)
+
+    db.commit()
+    db.refresh(user)
+
+
 def ensure_demo_holdings(db: Session, user: User) -> None:
     """Seed a small mock portfolio once so the dashboard is meaningful."""
     if user.holdings:
@@ -38,7 +101,7 @@ async def build_dashboard(db: Session, user: User) -> DashboardResponse:
     ensure_demo_holdings(db, user)
     holdings_out: list[HoldingOut] = []
     total_mv = 0.0
-    cash = 10_000.0  # mock cash; replace with ledger / broker later
+    cash = user.cash_balance
 
     for h in user.holdings:
         price = await market_data.get_price_for_holding(h.symbol, h.asset_type)

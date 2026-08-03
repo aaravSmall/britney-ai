@@ -7,6 +7,7 @@ import 'firebase_options.dart';
 import 'router/app_router.dart';
 import 'services/api_service.dart';
 import 'services/auth_controller.dart';
+import 'services/portfolio_bus.dart';
 import 'services/theme_controller.dart';
 import 'services/time_format_controller.dart';
 import 'theme/app_theme.dart';
@@ -36,6 +37,7 @@ class _BritneyAppState extends State<BritneyApp> {
   late final AuthController _auth = AuthController();
   late final ThemeController _theme = ThemeController();
   late final TimeFormatController _timeFormat = TimeFormatController();
+  late final PortfolioBus _portfolioBus = PortfolioBus();
   late final GoRouter _router = createRouter(_auth);
 
   @override
@@ -45,6 +47,7 @@ class _BritneyAppState extends State<BritneyApp> {
         ChangeNotifierProvider<AuthController>.value(value: _auth),
         ChangeNotifierProvider<ThemeController>.value(value: _theme),
         ChangeNotifierProvider<TimeFormatController>.value(value: _timeFormat),
+        ChangeNotifierProvider<PortfolioBus>.value(value: _portfolioBus),
         ProxyProvider<AuthController, ApiService>(
           update: (_, auth, __) => ApiService(getIdToken: auth.getIdToken),
         ),

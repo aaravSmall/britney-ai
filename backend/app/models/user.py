@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, Text
+from sqlalchemy import Boolean, DateTime, Float, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -26,6 +26,9 @@ class User(Base):
     )  # e.g. short, medium, long
 
     auto_invest_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Paper-trading cash balance; buys/sells debit and credit this directly.
+    cash_balance: Mapped[float] = mapped_column(Float, default=10_000.0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
