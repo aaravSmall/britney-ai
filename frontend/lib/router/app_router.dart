@@ -12,8 +12,6 @@ import '../theme/app_theme.dart';
 
 /// Builds router with [auth] so redirects react to sign-in without BuildContext.
 GoRouter createRouter(AuthController auth) {
-  final tabDirection = _TabDirection();
-
   return GoRouter(
     refreshListenable: auth,
     initialLocation: '/login',
@@ -34,32 +32,39 @@ GoRouter createRouter(AuthController auth) {
         path: '/onboarding',
         builder: (_, __) => const OnboardingScreen(),
       ),
-      ShellRoute(
-        builder: (context, state, child) => _MainShell(child: child),
-        routes: [
-          _tabRoute(
-            path: '/home',
-            index: 0,
-            tabDirection: tabDirection,
-            builder: (_, __) => const DashboardScreen(),
+      // StatefulShellRoute.indexedStack keeps each tab's widget tree (and
+      // state — dashboard data, scroll position, chat history, etc.) alive
+      // in an IndexedStack instead of rebuilding it from scratch on every
+      // switch. That rebuild cost — a fresh network fetch plus a full new
+      // widget tree, landing right in the middle of the switch animation —
+      // was the remaining source of jank after the previous fix (which only
+      // addressed a competing-transition bug, not this one).
+      StatefulShellRoute.indexedStack(
+        builder: (context, state, navigationShell) =>
+            _MainShell(navigationShell: navigationShell),
+        branches: [
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/home', builder: (_, __) => const DashboardScreen()),
+            ],
           ),
-          _tabRoute(
-            path: '/recommendations',
-            index: 1,
-            tabDirection: tabDirection,
-            builder: (_, __) => const RecommendationsScreen(),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/recommendations',
+                builder: (_, __) => const RecommendationsScreen(),
+              ),
+            ],
           ),
-          _tabRoute(
-            path: '/chat',
-            index: 2,
-            tabDirection: tabDirection,
-            builder: (_, __) => const ChatScreen(),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/chat', builder: (_, __) => const ChatScreen()),
+            ],
           ),
-          _tabRoute(
-            path: '/account',
-            index: 3,
-            tabDirection: tabDirection,
-            builder: (_, __) => const AccountScreen(),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/account', builder: (_, __) => const AccountScreen()),
+            ],
           ),
         ],
       ),
@@ -67,99 +72,75 @@ GoRouter createRouter(AuthController auth) {
   );
 }
 
-/// Tracks the last-visited bottom-tab index across navigations so a route's
-/// [pageBuilder] knows which way to slide when it's built.
-class _TabDirection {
-  int lastIndex = 0;
+class _MainShell extends StatefulWidget {
+  const _MainShell({required this.navigationShell});
+
+  final StatefulNavigationShell navigationShell;
+
+  @override
+  State<_MainShell> createState() => _MainShellState();
 }
 
-/// A bottom-tab route that slides in from the right when moving to a tab
-/// further right, and from the left when moving to a tab further left.
-///
-/// This drives the transition through go_router's own nested [Navigator]
-/// (which [ShellRoute] creates for its sub-routes) via [CustomTransitionPage],
-/// instead of layering a second, independent [AnimatedSwitcher] on top of it.
-/// Doing both at once was the cause of the previous stutter: the Navigator's
-/// own page-replace transition and the hand-rolled outer one were fighting
-/// over the same frames, and the outer one force-recreated the whole nested
-/// Navigator on every tab switch (new `ValueKey`), cutting its in-flight
-/// transition off mid-animation.
-GoRoute _tabRoute({
-  required String path,
-  required int index,
-  required _TabDirection tabDirection,
-  required Widget Function(BuildContext, GoRouterState) builder,
-}) {
-  return GoRoute(
-    path: path,
-    pageBuilder: (context, state) {
-      final forward = index >= tabDirection.lastIndex;
-      tabDirection.lastIndex = index;
-      return CustomTransitionPage(
-        key: state.pageKey,
-        transitionDuration: const Duration(milliseconds: 280),
-        reverseTransitionDuration: const Duration(milliseconds: 280),
-        child: RepaintBoundary(child: builder(context, state)),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final curved = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-          );
-          final slide = Tween<Offset>(
-            begin: forward ? const Offset(1.0, 0.0) : const Offset(-1.0, 0.0),
-            end: Offset.zero,
-          ).animate(curved);
-          return FadeTransition(
-            opacity: curved,
-            child: SlideTransition(position: slide, child: child),
-          );
-        },
-      );
-    },
+class _MainShellState extends State<_MainShell>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 280),
+  )..value = 1.0;
+  late final Animation<double> _curved = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
   );
-}
+  bool _forward = true;
 
-class _MainShell extends StatelessWidget {
-  const _MainShell({required this.child});
+  @override
+  void didUpdateWidget(covariant _MainShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldIndex = oldWidget.navigationShell.currentIndex;
+    final newIndex = widget.navigationShell.currentIndex;
+    if (oldIndex != newIndex) {
+      // Right-of-current tabs slide in from the right; left-of-current tabs
+      // slide in from the left.
+      _forward = newIndex > oldIndex;
+      _controller.forward(from: 0);
+    }
+  }
 
-  final Widget child;
-
-  static int _tabIndex(String path) {
-    if (path.startsWith('/recommendations')) return 1;
-    if (path.startsWith('/chat')) return 2;
-    if (path.startsWith('/account')) return 3;
-    return 0;
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final loc = GoRouterState.of(context).uri.path;
-    final index = _tabIndex(loc);
+    final index = widget.navigationShell.currentIndex;
 
     return Scaffold(
       body: DecoratedBox(
         decoration:
             BoxDecoration(gradient: AppTheme.scaffoldGradientOf(context)),
-        child: child,
+        child: AnimatedBuilder(
+          animation: _curved,
+          builder: (context, child) {
+            final dx = (1 - _curved.value) * (_forward ? 1.0 : -1.0);
+            return Opacity(
+              opacity: _curved.value.clamp(0.0, 1.0),
+              child: FractionalTranslation(
+                translation: Offset(dx, 0),
+                child: child,
+              ),
+            );
+          },
+          child: widget.navigationShell,
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
-        onDestinationSelected: (i) {
-          switch (i) {
-            case 0:
-              context.go('/home');
-              break;
-            case 1:
-              context.go('/recommendations');
-              break;
-            case 2:
-              context.go('/chat');
-              break;
-            case 3:
-              context.go('/account');
-              break;
-          }
-        },
+        onDestinationSelected: (i) => widget.navigationShell.goBranch(
+          i,
+          initialLocation: i == widget.navigationShell.currentIndex,
+        ),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.pie_chart_outline),

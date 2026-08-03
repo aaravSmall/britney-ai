@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../data/chart_kind.dart';
 import '../data/chart_range.dart';
 import '../services/api_service.dart';
 import '../services/auth_controller.dart';
@@ -18,6 +19,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   ChartRange _range = ChartRange.month30;
+  ChartKind _chartKind = ChartKind.line;
   bool _auto = false;
   bool _loading = false;
   String? _error;
@@ -152,12 +154,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .map((e) => e as Map<String, dynamic>)
         .toList();
     final sliced = _sliceForRange(performance, _range);
-    final spots = [
-      for (var i = 0; i < sliced.length; i++)
-        FlSpot(i.toDouble(), (sliced[i]['value'] as num).toDouble()),
+    final values = [
+      for (final p in sliced) (p['value'] as num).toDouble(),
     ];
-    final firstValue = spots.first.y;
-    final lastValue = spots.last.y;
+    final firstValue = values.first;
+    final lastValue = values.last;
     final periodChangePct =
         firstValue != 0 ? (lastValue - firstValue) / firstValue * 100 : 0.0;
     final total = (dashboard['total_portfolio_value'] as num).toDouble();
@@ -236,12 +237,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
               style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
             const SizedBox(height: 16),
-            Text(
-              'Performance',
-              style: t.titleSmall?.copyWith(
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.2,
-              ),
+            Row(
+              children: [
+                Text(
+                  'Performance',
+                  style: t.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+                const Spacer(),
+                _ChartKindToggle(
+                  value: _chartKind,
+                  onChanged: (k) => setState(() => _chartKind = k),
+                ),
+              ],
             ),
             const SizedBox(height: 10),
             SingleChildScrollView(
@@ -266,10 +276,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const SizedBox(height: 12),
             _SummaryCard(
               range: _range,
+              chartKind: _chartKind,
               totalValue: total,
               cash: cash,
               periodChangePct: periodChangePct,
-              spots: spots,
+              values: values,
             ),
             const SizedBox(height: 16),
             Card(
@@ -321,25 +332,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
 class _SummaryCard extends StatelessWidget {
   const _SummaryCard({
     required this.range,
+    required this.chartKind,
     required this.totalValue,
     required this.cash,
     required this.periodChangePct,
-    required this.spots,
+    required this.values,
   });
 
   final ChartRange range;
+  final ChartKind chartKind;
   final double totalValue;
   final double cash;
   final double periodChangePct;
-  final List<FlSpot> spots;
+  final List<double> values;
 
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final positive = periodChangePct >= 0;
-    final minY = spots.map((s) => s.y).reduce((a, b) => a < b ? a : b);
-    final maxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
-    final pad = (maxY - minY) * 0.08 + 1.0;
 
     return Card(
       child: Padding(
@@ -407,32 +417,268 @@ class _SummaryCard extends StatelessWidget {
             const SizedBox(height: 20),
             SizedBox(
               height: 180,
-              child: LineChart(
-                LineChartData(
-                  minY: minY - pad,
-                  maxY: maxY + pad,
-                  gridData: const FlGridData(show: false),
-                  titlesData: const FlTitlesData(show: false),
-                  borderData: FlBorderData(show: false),
-                  lineTouchData: const LineTouchData(enabled: false),
-                  lineBarsData: [
-                    LineChartBarData(
-                      spots: spots,
-                      isCurved: true,
-                      color: AppTheme.accent,
-                      barWidth: 2.5,
-                      dotData: const FlDotData(show: false),
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: AppTheme.accent.withValues(alpha: 0.12),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              child: switch (chartKind) {
+                ChartKind.line => _LineChartView(values: values),
+                ChartKind.candlestick =>
+                  _CandlestickChartView(values: values),
+                ChartKind.waterfall => _WaterfallChartView(values: values),
+              },
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ChartKindToggle extends StatelessWidget {
+  const _ChartKindToggle({required this.value, required this.onChanged});
+
+  final ChartKind value;
+  final ValueChanged<ChartKind> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: AppTheme.surface2Of(context),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final k in ChartKind.values) _button(context, k),
+        ],
+      ),
+    );
+  }
+
+  Widget _button(BuildContext context, ChartKind k) {
+    final selected = k == value;
+    return Tooltip(
+      message: k.label,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => onChanged(k),
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: selected
+                ? AppTheme.accent.withValues(alpha: 0.22)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            k.icon,
+            size: 18,
+            color: selected ? AppTheme.accent : AppTheme.textSecondaryOf(context),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sharp-angled line chart of the raw value series.
+class _LineChartView extends StatelessWidget {
+  const _LineChartView({required this.values});
+
+  final List<double> values;
+
+  @override
+  Widget build(BuildContext context) {
+    final spots = [
+      for (var i = 0; i < values.length; i++) FlSpot(i.toDouble(), values[i]),
+    ];
+    final minY = values.reduce((a, b) => a < b ? a : b);
+    final maxY = values.reduce((a, b) => a > b ? a : b);
+    final pad = (maxY - minY) * 0.08 + 1.0;
+
+    return LineChart(
+      LineChartData(
+        minY: minY - pad,
+        maxY: maxY + pad,
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        borderData: FlBorderData(show: false),
+        lineTouchData: const LineTouchData(enabled: false),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: false,
+            color: AppTheme.accent,
+            barWidth: 2.5,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(
+              show: true,
+              color: AppTheme.accent.withValues(alpha: 0.12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Day-over-day candles synthesized from the value series (open = previous
+/// value, close = current value; the backend only tracks a single value per
+/// day, so there's no real intraday high/low — a small fixed wick is drawn
+/// around the body for a legible candlestick silhouette).
+class _CandlestickChartView extends StatelessWidget {
+  const _CandlestickChartView({required this.values});
+
+  final List<double> values;
+
+  @override
+  Widget build(BuildContext context) {
+    final candles = <_Candle>[
+      for (var i = 1; i < values.length; i++)
+        _Candle(open: values[i - 1], close: values[i]),
+    ];
+    if (candles.isEmpty) {
+      candles.add(_Candle(open: values.first, close: values.first));
+    }
+    final minY = candles.map((c) => c.low).reduce((a, b) => a < b ? a : b);
+    final maxY = candles.map((c) => c.high).reduce((a, b) => a > b ? a : b);
+    final pad = (maxY - minY) * 0.08 + 1.0;
+
+    return CustomPaint(
+      size: Size.infinite,
+      painter: _CandlestickPainter(
+        candles: candles,
+        minY: minY - pad,
+        maxY: maxY + pad,
+        upColor: AppTheme.accent,
+        downColor: AppTheme.danger,
+      ),
+    );
+  }
+}
+
+class _Candle {
+  _Candle({required this.open, required this.close})
+      : high = (open > close ? open : close) * 1.0025,
+        low = (open < close ? open : close) * 0.9975;
+
+  final double open;
+  final double close;
+  final double high;
+  final double low;
+
+  bool get isUp => close >= open;
+}
+
+class _CandlestickPainter extends CustomPainter {
+  _CandlestickPainter({
+    required this.candles,
+    required this.minY,
+    required this.maxY,
+    required this.upColor,
+    required this.downColor,
+  });
+
+  final List<_Candle> candles;
+  final double minY;
+  final double maxY;
+  final Color upColor;
+  final Color downColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (candles.isEmpty) return;
+    final range = (maxY - minY).abs() < 1e-9 ? 1.0 : maxY - minY;
+    double yFor(double v) => size.height - ((v - minY) / range) * size.height;
+
+    final n = candles.length;
+    final slot = size.width / n;
+    final bodyWidth = (slot * 0.55).clamp(2.0, 16.0);
+
+    for (var i = 0; i < n; i++) {
+      final c = candles[i];
+      final cx = slot * i + slot / 2;
+      final color = c.isUp ? upColor : downColor;
+
+      canvas.drawLine(
+        Offset(cx, yFor(c.high)),
+        Offset(cx, yFor(c.low)),
+        Paint()
+          ..color = color
+          ..strokeWidth = 1.4,
+      );
+
+      final bodyTop = yFor(c.isUp ? c.close : c.open);
+      final bodyBottomRaw = yFor(c.isUp ? c.open : c.close);
+      final bodyBottom =
+          (bodyBottomRaw - bodyTop).abs() < 1.5 ? bodyTop + 1.5 : bodyBottomRaw;
+
+      canvas.drawRect(
+        Rect.fromLTRB(cx - bodyWidth / 2, bodyTop, cx + bodyWidth / 2, bodyBottom),
+        Paint()..color = color,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CandlestickPainter oldDelegate) =>
+      oldDelegate.candles != candles ||
+      oldDelegate.minY != minY ||
+      oldDelegate.maxY != maxY;
+}
+
+/// Floating bars connecting each day's value to the next — green when it
+/// rose, red when it fell.
+class _WaterfallChartView extends StatelessWidget {
+  const _WaterfallChartView({required this.values});
+
+  final List<double> values;
+
+  @override
+  Widget build(BuildContext context) {
+    final n = values.length;
+    final groups = <BarChartGroupData>[
+      for (var i = 1; i < n; i++)
+        BarChartGroupData(
+          x: i - 1,
+          barRods: [
+            BarChartRodData(
+              fromY: values[i - 1] < values[i] ? values[i - 1] : values[i],
+              toY: values[i - 1] < values[i] ? values[i] : values[i - 1],
+              color: values[i] >= values[i - 1]
+                  ? AppTheme.accent
+                  : AppTheme.danger,
+              width: (280 / n).clamp(3.0, 22.0),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ],
+        ),
+    ];
+    final minY = values.reduce((a, b) => a < b ? a : b);
+    final maxY = values.reduce((a, b) => a > b ? a : b);
+    final pad = (maxY - minY) * 0.08 + 1.0;
+
+    return BarChart(
+      BarChartData(
+        minY: minY - pad,
+        maxY: maxY + pad,
+        gridData: const FlGridData(show: false),
+        titlesData: const FlTitlesData(show: false),
+        borderData: FlBorderData(show: false),
+        barTouchData: BarTouchData(enabled: false),
+        barGroups: groups.isEmpty
+            ? [
+                BarChartGroupData(
+                  x: 0,
+                  barRods: [
+                    BarChartRodData(
+                      fromY: minY,
+                      toY: maxY,
+                      color: AppTheme.accent,
+                    ),
+                  ],
+                ),
+              ]
+            : groups,
       ),
     );
   }

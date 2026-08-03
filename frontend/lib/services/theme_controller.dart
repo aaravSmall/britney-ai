@@ -14,12 +14,18 @@ class ThemeController extends ChangeNotifier {
   ThemeMode _mode = ThemeMode.dark;
   ThemeMode get mode => _mode;
 
+  // If the user calls setMode() while the initial _load() read is still in
+  // flight, that explicit choice must win — otherwise _load() can resolve
+  // afterwards and silently clobber it back to whatever was last persisted.
+  bool _userSet = false;
+
   ThemeController() {
     _load();
   }
 
   Future<void> _load() async {
     final saved = await _prefs.getString(_prefsKey);
+    if (_userSet) return;
     final match = ThemeMode.values.where((m) => m.name == saved);
     if (match.isNotEmpty && match.first != _mode) {
       _mode = match.first;
@@ -28,6 +34,7 @@ class ThemeController extends ChangeNotifier {
   }
 
   Future<void> setMode(ThemeMode mode) async {
+    _userSet = true;
     if (_mode == mode) return;
     _mode = mode;
     notifyListeners();
