@@ -157,6 +157,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final values = [
       for (final p in sliced) (p['value'] as num).toDouble(),
     ];
+    final dates = [
+      for (final p in sliced) p['date'] as String,
+    ];
     final firstValue = values.first;
     final lastValue = values.last;
     final periodChangePct =
@@ -281,6 +284,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               cash: cash,
               periodChangePct: periodChangePct,
               values: values,
+              dates: dates,
             ),
             const SizedBox(height: 16),
             Card(
@@ -329,7 +333,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 }
 
-class _SummaryCard extends StatelessWidget {
+const List<String> _monthAbbr = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+const List<String> _monthFull = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+String _shortDate(String iso) {
+  final d = DateTime.tryParse(iso);
+  if (d == null) return iso;
+  return '${_monthAbbr[d.month - 1]} ${d.day}';
+}
+
+String _fullDate(String iso) {
+  final d = DateTime.tryParse(iso);
+  if (d == null) return iso;
+  return '${_monthFull[d.month - 1]} ${d.day}, ${d.year}';
+}
+
+class _SummaryCard extends StatefulWidget {
   const _SummaryCard({
     required this.range,
     required this.chartKind,
@@ -337,6 +362,7 @@ class _SummaryCard extends StatelessWidget {
     required this.cash,
     required this.periodChangePct,
     required this.values,
+    required this.dates,
   });
 
   final ChartRange range;
@@ -345,11 +371,55 @@ class _SummaryCard extends StatelessWidget {
   final double cash;
   final double periodChangePct;
   final List<double> values;
+  final List<String> dates;
+
+  @override
+  State<_SummaryCard> createState() => _SummaryCardState();
+}
+
+class _SummaryCardState extends State<_SummaryCard> {
+  int? _scrubIndex;
+
+  void _updateScrub(double localX, double width) {
+    final n = widget.values.length;
+    if (n <= 1 || width <= 0) return;
+    final t = (localX / width).clamp(0.0, 1.0);
+    final idx = (t * (n - 1)).round().clamp(0, n - 1);
+    if (idx != _scrubIndex) setState(() => _scrubIndex = idx);
+  }
+
+  void _endScrub() {
+    if (_scrubIndex != null) setState(() => _scrubIndex = null);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SummaryCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Range/chart-kind changes swap the underlying data — a stale scrub
+    // index into the old series would show the wrong value.
+    if (oldWidget.range != widget.range || oldWidget.values.length != widget.values.length) {
+      _scrubIndex = null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
-    final positive = periodChangePct >= 0;
+    final scrubbing = _scrubIndex != null;
+    final start = widget.values.first;
+    final displayValue = scrubbing ? widget.values[_scrubIndex!] : widget.totalValue;
+    final displayPct = scrubbing
+        ? (start != 0
+            ? (widget.values[_scrubIndex!] - start) / start * 100
+            : 0.0)
+        : widget.periodChangePct;
+    final positive = displayPct >= 0;
+    final subtitle = scrubbing
+        ? _fullDate(widget.dates[_scrubIndex!])
+        : widget.range.description;
+    final chipLabel = scrubbing
+        ? 'since start'
+        : (widget.range == ChartRange.today ? 'today' : 'in period');
 
     return Card(
       child: Padding(
@@ -366,7 +436,7 @@ class _SummaryCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '\$${totalValue.toStringAsFixed(2)}',
+              '\$${displayValue.toStringAsFixed(2)}',
               style: t.headlineMedium?.copyWith(
                 fontWeight: FontWeight.w700,
                 letterSpacing: -0.5,
@@ -374,7 +444,7 @@ class _SummaryCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              range.description,
+              subtitle,
               style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
             ),
             const SizedBox(height: 8),
@@ -387,7 +457,7 @@ class _SummaryCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  'Cash \$${cash.toStringAsFixed(2)}',
+                  'Cash \$${widget.cash.toStringAsFixed(2)}',
                   style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
                 const SizedBox(width: 14),
@@ -403,8 +473,7 @@ class _SummaryCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
-                    '${positive ? '+' : ''}${periodChangePct.toStringAsFixed(2)}% '
-                    '${range == ChartRange.today ? 'today' : 'in period'}',
+                    '${positive ? '+' : ''}${displayPct.toStringAsFixed(2)}% $chipLabel',
                     style: TextStyle(
                       color: positive ? AppTheme.accent : AppTheme.danger,
                       fontWeight: FontWeight.w600,
@@ -415,18 +484,171 @@ class _SummaryCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 20),
-            SizedBox(
-              height: 180,
-              child: switch (chartKind) {
-                ChartKind.line => _LineChartView(values: values),
-                ChartKind.candlestick =>
-                  _CandlestickChartView(values: values),
-                ChartKind.waterfall => _WaterfallChartView(values: values),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                final n = widget.values.length;
+                final xForIndex = n > 1
+                    ? (_scrubIndex ?? 0) / (n - 1) * width
+                    : width / 2;
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  // Horizontal-only recognizers (not onPan*) so this plays
+                  // nicely with the enclosing vertical ListView's scroll
+                  // gesture instead of fighting it for the arena.
+                  onHorizontalDragStart: (d) =>
+                      _updateScrub(d.localPosition.dx, width),
+                  onHorizontalDragUpdate: (d) =>
+                      _updateScrub(d.localPosition.dx, width),
+                  onHorizontalDragEnd: (_) => _endScrub(),
+                  onHorizontalDragCancel: _endScrub,
+                  onTapDown: (d) => _updateScrub(d.localPosition.dx, width),
+                  onTapUp: (_) => _endScrub(),
+                  child: SizedBox(
+                    height: 180,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          // fl_chart still occupies hit-test space even with
+                          // its own touch data disabled; ignore it so only
+                          // the GestureDetector above ever sees pointer
+                          // events, regardless of chart kind.
+                          child: IgnorePointer(
+                            child: switch (widget.chartKind) {
+                              ChartKind.line =>
+                                _LineChartView(values: widget.values),
+                              ChartKind.candlestick =>
+                                _CandlestickChartView(values: widget.values),
+                              ChartKind.waterfall =>
+                                _WaterfallChartView(values: widget.values),
+                            },
+                          ),
+                        ),
+                        if (scrubbing) ...[
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _ScrubLinePainter(
+                                  x: xForIndex,
+                                  color: AppTheme.textSecondaryOf(context),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: 0,
+                            left: (xForIndex - 54).clamp(0.0, width - 108),
+                            child: IgnorePointer(
+                              child: _ScrubTooltip(
+                                value: widget.values[_scrubIndex!],
+                                date: _shortDate(widget.dates[_scrubIndex!]),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
               },
             ),
+            const SizedBox(height: 8),
+            _ChartXAxisLabels(dates: widget.dates),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _ScrubLinePainter extends CustomPainter {
+  _ScrubLinePainter({required this.x, required this.color});
+
+  final double x;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawLine(
+      Offset(x, 0),
+      Offset(x, size.height),
+      Paint()
+        ..color = color.withValues(alpha: 0.5)
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScrubLinePainter oldDelegate) =>
+      oldDelegate.x != x || oldDelegate.color != color;
+}
+
+class _ScrubTooltip extends StatelessWidget {
+  const _ScrubTooltip({required this.value, required this.date});
+
+  final double value;
+  final String date;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 108,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppTheme.surface2Of(context),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.borderSubtleOf(context)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '\$${value.toStringAsFixed(2)}',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: AppTheme.textPrimaryOf(context),
+            ),
+          ),
+          Text(
+            date,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 10,
+              color: AppTheme.textSecondaryOf(context),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChartXAxisLabels extends StatelessWidget {
+  const _ChartXAxisLabels({required this.dates});
+
+  final List<String> dates;
+
+  @override
+  Widget build(BuildContext context) {
+    final n = dates.length;
+    if (n == 0) return const SizedBox.shrink();
+    final tickCount = n < 4 ? n : 4;
+    final indices = <int>[
+      for (var i = 0; i < tickCount; i++)
+        tickCount == 1 ? 0 : (i * (n - 1) / (tickCount - 1)).round(),
+    ];
+    final style = TextStyle(
+      fontSize: 10,
+      color: AppTheme.textSecondaryOf(context),
+    );
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        for (final i in indices) Text(_shortDate(dates[i]), style: style),
+      ],
     );
   }
 }
