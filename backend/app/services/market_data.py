@@ -58,9 +58,49 @@ async def fetch_crypto_price_usd(symbol: str) -> float | None:
             return price
 
 
+async def _fetch_alpaca_stock_price(symbol: str, settings: Any) -> float | None:
+    """Paid/production path: Alpaca Market Data API (separate host from the
+    paper-trading order API in settings.alpaca_base_url)."""
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
+    }
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol.upper()}/trades/latest"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            return float(data["trade"]["p"])
+        except Exception:
+            return None
+
+
+async def _fetch_yahoo_stock_price(symbol: str) -> float | None:
+    """Free path: Yahoo Finance's public (unofficial, unauthenticated) quote
+    endpoint. No signup/key required — good enough for an MVP, but
+    undocumented and can change or rate-limit without notice."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol.upper()}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(
+                url,
+                params={"range": "1d", "interval": "1m"},
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            meta = data["chart"]["result"][0]["meta"]
+            price = meta.get("regularMarketPrice")
+            return float(price) if price is not None else None
+        except Exception:
+            return None
+
+
 async def fetch_stock_price(symbol: str) -> float | None:
     """
-    Alpaca integration placeholder: if keys set, call Alpaca; else mock.
+    Live quote with graceful degradation: Alpaca (if paid keys configured)
+    -> free Yahoo Finance endpoint -> static mock as a last resort.
     """
     key = f"STOCK:{symbol.upper()}"
     c = _get_cached(key)
@@ -69,23 +109,17 @@ async def fetch_stock_price(symbol: str) -> float | None:
 
     settings = get_settings()
     if settings.alpaca_api_key and settings.alpaca_secret_key:
-        headers = {
-            "APCA-API-KEY-ID": settings.alpaca_api_key,
-            "APCA-API-SECRET-KEY": settings.alpaca_secret_key,
-        }
-        url = f"{settings.alpaca_base_url.rstrip('/')}/v2/stocks/{symbol.upper()}/latest/trade"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                r = await client.get(url, headers=headers)
-                r.raise_for_status()
-                data = r.json()
-                price = float(data["trade"]["p"])
-                _set_cached(key, price)
-                return price
-            except Exception:
-                pass
+        price = await _fetch_alpaca_stock_price(symbol, settings)
+        if price is not None:
+            _set_cached(key, price)
+            return price
 
-    # Mock prices for common tickers
+    price = await _fetch_yahoo_stock_price(symbol)
+    if price is not None:
+        _set_cached(key, price)
+        return price
+
+    # Last-resort mock, only reached if both live sources fail (e.g. offline).
     mock_stocks = {
         "AAPL": 230.0,
         "MSFT": 420.0,
