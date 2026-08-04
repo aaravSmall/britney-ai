@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    finnhub_api_key: str = ""
 
     # Firebase service account JSON path; if unset, AUTH_DISABLED can allow dev access
     firebase_credentials_path: str = ""

@@ -1,0 +1,70 @@
+britney.ai — future ideas / plans
+(running notes, not commitments — add/cross off freely)
+
+DATA & BACKEND
+- Real performance history: dashboard's 30-day chart is still a random mock
+  seeded from user id, unrelated to actual trades/holdings. Need a daily
+  snapshot table (portfolio value per user per day) to make it real.
+- Websocket/streaming quotes instead of polling Yahoo/CoinGecko on each
+  dashboard load — cheaper and feels more "live".
+- Move off the Yahoo Finance unofficial endpoint before any real launch —
+  see docs/TECH_STACK.md for paid alternatives (Alpaca/Polygon/IEX).
+- Trade history / order log screen (right now a fill just mutates
+  cash + holdings, nothing records that the trade happened).
+- Real cash ledger instead of a single cash_balance float (deposits,
+  withdrawals, dividends, fees down the line).
+
+TRADING
+- REMINDER before the agent (prompt 4) starts trading on a schedule:
+  get_or_create_portfolio() is currently only called from build_dashboard's
+  path (via ensure_demo_holdings) and from record_trade_fill itself, but
+  ensure_demo_holdings is NOT called from record_trade_fill — so a
+  portfolio that's never been loaded via /dashboard (pre-existing
+  CORS/first-load timing edge case) can still be traded against, just
+  without demo seed holdings. Before the agent trades on a schedule
+  without a user ever having opened /dashboard first, make
+  record_trade_fill call get_or_create_portfolio() directly (it already
+  does) AND decide whether it should also seed/initialize like
+  ensure_demo_holdings does, so a never-loaded portfolio can't cause a
+  failed/mysterious agent trade. Flagged 2026-08-04, not yet implemented.
+- Actual Alpaca live/paper order routing (execution.py has a placeholder
+  for this — currently everything is simulated locally).
+- Fractional share support / rounding rules for crypto vs stock vs option
+  quantities.
+- Recurring/auto-invest execution (auto_invest_enabled toggle exists but
+  nothing runs on a schedule yet).
+
+FRONTEND / UX
+- Holdings detail screen (tap a position -> price history, buy/sell,
+  cost basis, P/L).
+- Notifications (price alerts, trade confirmations, daily digest).
+- Stock search: search any ticker (not just recommended assets), land on a
+  detail page with price/chart + company info (name, sector, description,
+  market cap, etc.), and buy/sell straight from there. Needs a backend
+  endpoint for company fundamentals/profile — current market_data.py only
+  fetches a bare price, not company metadata.
+- Onboarding: capture more nuanced risk profile inputs (current fields are
+  pretty coarse: risk_tolerance/goals/time_horizon strings).
+- Mobile builds (android/ios folders aren't generated yet — currently
+  flutter web only in practice).
+
+AI
+- Stream chat responses instead of waiting for the full completion.
+- Let recommendations reference the user's *actual* current holdings
+  (right now it's generated independent of the portfolio).
+- Guardrails/eval pass on recommendation output before showing it.
+
+INFRA
+- Deploy backend + Postgres somewhere real (see docs/TECH_STACK.md).
+- CI: no tests or lint pipeline exist yet.
+- Alembic migrations instead of relying on create_all (breaks on schema
+  changes to existing DBs — currently working around this by deleting
+  the local sqlite file).
+
+MONETIZATION / PRODUCT (loose, unranked)
+- Premium tier ideas: real-time data, more AI chat volume, tax-loss
+  harvesting suggestions, deeper backtesting.
+- Referral / waitlist mechanics for launch.
+
+
+
