@@ -5,7 +5,7 @@ from random import Random
 
 from sqlalchemy.orm import Session
 
-from app.models import PortfolioHolding, User
+from app.models import Portfolio, PortfolioHolding, Trade, User
 from app.schemas.dashboard import DashboardResponse, HoldingOut, PerformancePoint
 from app.services import market_data
 
@@ -18,6 +18,18 @@ class InsufficientHoldingsError(Exception):
     pass
 
 
+def get_or_create_portfolio(db: Session, user: User) -> Portfolio:
+    """Every user gets exactly one portfolio, created lazily on first use
+    (mirrors how ensure_demo_holdings used to lazily seed holdings)."""
+    if user.portfolio is not None:
+        return user.portfolio
+    portfolio = Portfolio(user_id=user.id)
+    db.add(portfolio)
+    db.commit()
+    db.refresh(portfolio)
+    return portfolio
+
+
 def record_trade_fill(
     db: Session,
     user: User,
@@ -26,20 +38,31 @@ def record_trade_fill(
     side: str,
     quantity: float,
     price: float,
-) -> None:
-    """Apply a filled paper trade to the user's cash and holdings."""
+    *,
+    simulated: bool = True,
+    order_id: str | None = None,
+    source: str = "user",
+) -> Trade:
+    """Apply a filled paper trade to the portfolio's cash/holdings and log
+    it as a Trade row. `source` distinguishes user-initiated fills (this
+    endpoint) from the autonomous agent's, once that writes here too."""
+    portfolio = get_or_create_portfolio(db, user)
     holding = next(
-        (h for h in user.holdings if h.symbol == symbol and h.asset_type == asset_type),
+        (
+            h
+            for h in portfolio.holdings
+            if h.symbol == symbol and h.asset_type == asset_type
+        ),
         None,
     )
     cost = quantity * price
 
     if side == "buy":
-        if user.cash_balance < cost:
+        if portfolio.cash_balance < cost:
             raise InsufficientFundsError(
-                f"Insufficient cash: need ${cost:,.2f}, have ${user.cash_balance:,.2f}"
+                f"Insufficient cash: need ${cost:,.2f}, have ${portfolio.cash_balance:,.2f}"
             )
-        user.cash_balance -= cost
+        portfolio.cash_balance -= cost
         if holding:
             new_qty = holding.quantity + quantity
             holding.avg_cost = (
@@ -49,7 +72,7 @@ def record_trade_fill(
             holding.last_price = price
         else:
             holding = PortfolioHolding(
-                user_id=user.id,
+                portfolio_id=portfolio.id,
                 symbol=symbol,
                 asset_type=asset_type,
                 quantity=quantity,
@@ -63,20 +86,37 @@ def record_trade_fill(
             raise InsufficientHoldingsError(
                 f"Insufficient {symbol}: trying to sell {quantity}, hold {have}"
             )
-        user.cash_balance += cost
+        portfolio.cash_balance += cost
         holding.quantity -= quantity
         holding.last_price = price
         if holding.quantity <= 1e-9:
             db.delete(holding)
 
+    trade = Trade(
+        portfolio_id=portfolio.id,
+        symbol=symbol,
+        asset_type=asset_type,
+        side=side,
+        quantity=quantity,
+        price=price,
+        status="filled",
+        simulated=simulated,
+        source=source,
+        order_id=order_id,
+    )
+    db.add(trade)
+
     db.commit()
-    db.refresh(user)
+    db.refresh(portfolio)
+    db.refresh(trade)
+    return trade
 
 
-def ensure_demo_holdings(db: Session, user: User) -> None:
+def ensure_demo_holdings(db: Session, user: User) -> Portfolio:
     """Seed a small mock portfolio once so the dashboard is meaningful."""
-    if user.holdings:
-        return
+    portfolio = get_or_create_portfolio(db, user)
+    if portfolio.holdings:
+        return portfolio
     seed = [
         ("VOO", "stock", 2.0, 450.0),
         ("AAPL", "stock", 1.5, 220.0),
@@ -85,7 +125,7 @@ def ensure_demo_holdings(db: Session, user: User) -> None:
     for sym, atype, qty, cost in seed:
         db.add(
             PortfolioHolding(
-                user_id=user.id,
+                portfolio_id=portfolio.id,
                 symbol=sym,
                 asset_type=atype,
                 quantity=qty,
@@ -94,16 +134,17 @@ def ensure_demo_holdings(db: Session, user: User) -> None:
         )
     db.commit()
     # Reload relationship so the dashboard sees new rows
-    db.expire(user)
+    db.expire(portfolio)
+    return portfolio
 
 
 async def build_dashboard(db: Session, user: User) -> DashboardResponse:
-    ensure_demo_holdings(db, user)
+    portfolio = ensure_demo_holdings(db, user)
     holdings_out: list[HoldingOut] = []
     total_mv = 0.0
-    cash = user.cash_balance
+    cash = portfolio.cash_balance
 
-    for h in user.holdings:
+    for h in portfolio.holdings:
         price = await market_data.get_price_for_holding(h.symbol, h.asset_type)
         if price is None:
             price = h.last_price or h.avg_cost
@@ -148,8 +189,9 @@ async def build_dashboard(db: Session, user: User) -> DashboardResponse:
 
 
 def portfolio_summary_text(db: Session, user: User) -> str:
+    portfolio = get_or_create_portfolio(db, user)
     lines = []
-    for h in user.holdings:
+    for h in portfolio.holdings:
         lines.append(
             f"- {h.symbol} ({h.asset_type}) qty {h.quantity} @ avg {h.avg_cost}"
         )

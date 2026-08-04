@@ -36,7 +36,16 @@ async def place_trade(
     if result.status == "filled":
         try:
             record_trade_fill(
-                db, user, body.symbol, body.asset_type, body.side, body.quantity, price
+                db,
+                user,
+                body.symbol,
+                body.asset_type,
+                body.side,
+                body.quantity,
+                price,
+                simulated=result.simulated,
+                order_id=result.order_id,
+                source="user",
             )
         except (InsufficientFundsError, InsufficientHoldingsError) as e:
             raise HTTPException(status_code=400, detail=str(e)) from e

@@ -20,7 +20,13 @@ class Portfolio(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Paper-trading cash balance; buys/sells debit and credit this directly.
+    cash_balance: Mapped[float] = mapped_column(Float, default=10_000.0)
+
     user = relationship("User", back_populates="portfolio")
+    holdings = relationship(
+        "PortfolioHolding", back_populates="portfolio", cascade="all, delete-orphan"
+    )
     trades = relationship(
         "Trade", back_populates="portfolio", cascade="all, delete-orphan"
     )
@@ -56,7 +62,9 @@ class PortfolioHolding(Base):
     __tablename__ = "portfolio_holdings"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    portfolio_id: Mapped[int] = mapped_column(
+        ForeignKey("portfolios.id", ondelete="CASCADE"), index=True
+    )
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     asset_type: Mapped[str] = mapped_column(
         String(16), default="stock"
@@ -69,4 +77,4 @@ class PortfolioHolding(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    user = relationship("User", back_populates="holdings")
+    portfolio = relationship("Portfolio", back_populates="holdings")

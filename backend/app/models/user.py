@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, String, Text
+from sqlalchemy import Boolean, DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -27,17 +27,13 @@ class User(Base):
 
     auto_invest_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # Paper-trading cash balance; buys/sells debit and credit this directly.
-    cash_balance: Mapped[float] = mapped_column(Float, default=10_000.0)
-
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    holdings = relationship(
-        "PortfolioHolding", back_populates="user", cascade="all, delete-orphan"
-    )
+    # Cash/holdings live on Portfolio now (see app.models.portfolio) — this
+    # is a one-per-user account for trades, snapshots, and agent decisions.
     portfolio = relationship(
         "Portfolio", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
