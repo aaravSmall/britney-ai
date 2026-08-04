@@ -38,3 +38,6 @@ class User(Base):
     holdings = relationship(
         "PortfolioHolding", back_populates="user", cascade="all, delete-orphan"
     )
+    portfolio = relationship(
+        "Portfolio", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )

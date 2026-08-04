@@ -2,10 +2,54 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+
+class Portfolio(Base):
+    """One portfolio per user (for now) — the account that trades,
+    snapshots, and agent decisions attach to."""
+
+    __tablename__ = "portfolios"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="portfolio")
+    trades = relationship(
+        "Trade", back_populates="portfolio", cascade="all, delete-orphan"
+    )
+    snapshots = relationship(
+        "PortfolioSnapshot", back_populates="portfolio", cascade="all, delete-orphan"
+    )
+    agent_decisions = relationship(
+        "AgentDecision", back_populates="portfolio", cascade="all, delete-orphan"
+    )
+
+
+class PortfolioSnapshot(Base):
+    """Daily portfolio value snapshot — real performance history, as
+    opposed to the dashboard's current mocked random-walk chart."""
+
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    portfolio_id: Mapped[int] = mapped_column(
+        ForeignKey("portfolios.id", ondelete="CASCADE"), index=True
+    )
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+    total_value: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    holdings: Mapped[dict] = mapped_column(JSON, default=dict)  # ticker -> quantity
+
+    portfolio = relationship("Portfolio", back_populates="snapshots")
 
 
 class PortfolioHolding(Base):
