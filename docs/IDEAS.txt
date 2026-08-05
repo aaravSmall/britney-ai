@@ -48,6 +48,48 @@ FRONTEND / UX
 - Mobile builds (android/ios folders aren't generated yet — currently
   flutter web only in practice).
 
+AGENT — CRYPTO NEWS (plan only, not implemented; flagged 2026-08-04)
+- Gap: backend/agent/news_ingestion.py only fetches stock/ETF news via
+  Finnhub's free /company-news endpoint, which doesn't cover crypto —
+  BTC/ETH/SOL are listed in TARGET_PORTFOLIOS but silently skipped. The
+  agent isn't feature-complete until it has a crypto news source too.
+- Source options (free-tier-first, roughly in order of how much cleanup
+  they'd need before feeding the sentiment/decision loop):
+  - CryptoPanic free tier — purpose-built crypto news aggregator, already
+    tags posts with currency codes (closest analog to Finnhub's `related`
+    field), but the free API has gotten stingier over time (auth token
+    required, low request quota) — needs checking at implementation time.
+  - CoinDesk / CoinTelegraph (or similar) RSS feeds — free, no key, no
+    rate limit beyond "don't hammer it," but no ticker tagging at all:
+    would need keyword/symbol matching against headline+body to attribute
+    an article to BTC/ETH/SOL, and no stable article id (would hash the
+    URL, same trick as any id-less source).
+  - Reddit (e.g. r/CryptoCurrency, r/Bitcoin) via the public `.json`
+    endpoints — free, no auth for read-only, but noisier signal per-post
+    than news articles; probably wants aggregation across many posts
+    rather than per-post scoring, and needs a custom User-Agent header or
+    Reddit rate-limits/blocks the requests.
+  - CryptoCompare News API — another free-tier aggregator option, similar
+    tradeoffs to CryptoPanic, worth a quick comparison before picking one.
+- Interface: whichever source(s) get picked should normalize into the
+  exact same NewsArticle shape news_ingestion.py already produces
+  ({ticker, headline, summary, source, url, published_at, article_id}),
+  either via a new fetch_crypto_news() alongside fetch_news() or by
+  extending fetch_news() to branch on asset_type internally. Either way
+  the goal is that agent/sentiment.py and the future decision-loop module
+  don't need to know or care which provider a given article came from.
+- Gotchas:
+  - Crypto trades 24/7 — no market-hours gating like stocks implicitly
+    get. Whatever polling/scheduling cadence the agent ends up using for
+    stock news shouldn't just be reused verbatim for crypto; crypto news
+    can matter just as much at 3am as 3pm.
+  - Ticker attribution from free-text sources (RSS/Reddit) is fuzzy —
+    keyword matching risks both false positives (e.g. "ETH Zurich") and
+    false negatives (nicknames, tickers not mentioned verbatim).
+  - Rate limits and ToS vary a lot across these free options and are
+    worth re-checking right before implementation, not just at planning
+    time — free tiers change terms/quotas without much notice.
+
 AI
 - Stream chat responses instead of waiting for the full completion.
 - Let recommendations reference the user's *actual* current holdings
