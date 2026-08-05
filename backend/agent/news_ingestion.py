@@ -15,6 +15,7 @@ can be exercised without booting FastAPI or a real database:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -26,6 +27,8 @@ import httpx
 from app.config import get_settings
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
+
+logger = logging.getLogger(__name__)
 
 # Finnhub's free tier allows ~60 calls/min; stay under that with headroom
 # in case something else in the process is also calling Finnhub.
@@ -204,6 +207,7 @@ async def _fetch_ticker_news_finnhub(
         },
         timeout=10.0,
     )
+    logger.info("finnhub company-news request: %s status=%s", ticker, resp.status_code)
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else []
@@ -230,6 +234,10 @@ async def fetch_news(
     results: list[NewsArticle] = []
 
     if not settings.finnhub_api_key:
+        logger.warning(
+            "MOCK MODE: FINNHUB_API_KEY not set — returning offline placeholder "
+            "articles instead of calling the real Finnhub API."
+        )
         for ticker in tickers:
             for raw in _mock_articles(ticker):
                 article = _normalize(ticker, raw, provider="mock")
@@ -239,27 +247,55 @@ async def fetch_news(
                 store.mark_seen(article.article_id)
         return results
 
+    logger.info("FINNHUB_API_KEY loaded — calling the real Finnhub API.")
     limiter = RateLimiter(calls_per_minute)
+    failed_tickers: list[str] = []
     async with httpx.AsyncClient() as client:
         for ticker in tickers:
             try:
                 raw_articles = await _fetch_ticker_news_finnhub(
                     client, ticker, settings.finnhub_api_key, limiter, days_back
                 )
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
                 # Skip this ticker for this run; the next scheduled run retries.
+                failed_tickers.append(ticker)
+                logger.error("REAL API CALL FAILED for %s: %s", ticker, exc)
                 continue
+            new_count = 0
             for raw in raw_articles:
                 article = _normalize(ticker, raw, provider="finnhub")
                 if store.has_seen(article.article_id):
                     continue
                 results.append(article)
                 store.mark_seen(article.article_id)
+                new_count += 1
+            logger.info(
+                "%s: %d fetched, %d new (%d already seen)",
+                ticker, len(raw_articles), new_count, len(raw_articles) - new_count,
+            )
+
+    if failed_tickers:
+        logger.warning(
+            "Real Finnhub API call failed for %d/%d ticker(s): %s",
+            len(failed_tickers), len(tickers), ", ".join(failed_tickers),
+        )
+    elif not results:
+        logger.info(
+            "REAL API CALL SUCCEEDED, ZERO NEW ARTICLES: Finnhub returned no "
+            "new (unseen) articles for any of %d ticker(s) in the last %d day(s).",
+            len(tickers), days_back,
+        )
 
     return results
 
 
 async def _main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # httpx logs the full request URL at INFO level, which includes
+    # ?token=<FINNHUB_API_KEY> in plaintext — drop it to WARNING so the key
+    # never lands in logs. Our own "finnhub company-news request" log line
+    # already reports ticker + status code without the token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     articles = await fetch_news()
     print(f"Fetched {len(articles)} new article(s):")
     for a in articles:
