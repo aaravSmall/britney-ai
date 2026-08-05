@@ -9,19 +9,27 @@ from app.database import Base
 
 
 class Portfolio(Base):
-    """One portfolio per user (for now) — the account that trades,
-    snapshots, and agent decisions attach to."""
+    """The account that trades, snapshots, and agent decisions attach to.
+    Either owned by a real user (owner_type="user", user_id set — one
+    portfolio per user) or by the autonomous agent (owner_type="agent",
+    user_id NULL — one per risk tier, not backed by any User row)."""
 
     __tablename__ = "portfolios"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True, nullable=True
     )
+    owner_type: Mapped[str] = mapped_column(String(8), default="user")  # user | agent
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Paper-trading cash balance; buys/sells debit and credit this directly.
     cash_balance: Mapped[float] = mapped_column(Float, default=10_000.0)
+
+    # Only meaningful for owner_type="agent" portfolios (low|medium|high,
+    # same vocabulary as User.risk_tolerance) — a real user's portfolio
+    # instead reads risk tier off its User via the relationship below.
+    risk_tolerance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     user = relationship("User", back_populates="portfolio")
     holdings = relationship(

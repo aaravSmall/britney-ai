@@ -36,13 +36,12 @@ from agent import news_ingestion, sentiment
 from agent.news_ingestion import NewsArticle
 from agent.sentiment import ScoreResult
 from app.database import SessionLocal
-from app.models import Portfolio, Trade, User
+from app.models import Portfolio, Trade
 from app.services import market_data
 from app.services.agent_decision_service import create_agent_decision
 from app.services.portfolio_service import (
     InsufficientFundsError,
     InsufficientHoldingsError,
-    get_or_create_portfolio,
     record_trade_fill,
 )
 from app.services.portfolio_snapshot_service import create_snapshot
@@ -75,30 +74,9 @@ RISK_PROFILES: dict[str, dict[str, float | int]] = {
     },
 }
 
-# Synthetic users backing the three agent-managed model portfolios —
-# distinct from real signed-up users, since Portfolio.user_id is a
-# required unique FK and the agent needs *a* portfolio to run against for
-# each risk tier regardless of whether any real user has that profile.
-AGENT_USER_SEEDS: dict[str, dict[str, str]] = {
-    "conservative": {
-        "firebase_uid": "agent-conservative",
-        "email": "agent-conservative@britney.ai.local",
-        "name": "Agent — Conservative",
-        "risk_tolerance": "low",
-    },
-    "moderate": {
-        "firebase_uid": "agent-moderate",
-        "email": "agent-moderate@britney.ai.local",
-        "name": "Agent — Moderate",
-        "risk_tolerance": "medium",
-    },
-    "aggressive": {
-        "firebase_uid": "agent-aggressive",
-        "email": "agent-aggressive@britney.ai.local",
-        "name": "Agent — Aggressive",
-        "risk_tolerance": "high",
-    },
-}
+# Inverse of RISK_TIER_BY_TOLERANCE — the risk_tolerance value to store on
+# each agent-managed model portfolio, one per tier.
+RISK_TOLERANCE_BY_TIER: dict[str, str] = {v: k for k, v in RISK_TIER_BY_TOLERANCE.items()}
 
 
 @dataclass
@@ -113,38 +91,41 @@ class RunSummary:
 
 def ensure_target_portfolios(db: Session) -> dict[str, int]:
     """Idempotently create (or fetch) the three agent-managed model
-    portfolios, one per risk tier. Safe to call every run_agent.py tick —
-    a portfolio that's never been created yet (this is the agent's own
-    first-ever run, not a "never loaded /dashboard" user) is created here
-    with default cash and zero holdings, same as get_or_create_portfolio
-    does for a real user; it is deliberately NOT seeded with the
-    demo-mode holdings from ensure_demo_holdings (VOO/AAPL/BTC) — those
-    exist purely so a fresh human demo login has something to look at, and
-    would misrepresent the agent's own trading history if applied here.
+    portfolios, one per risk tier — owner_type="agent", user_id=None, no
+    backing User row at all (Portfolio.user_id is nullable specifically
+    for this). Safe to call every run_agent.py tick: a portfolio that's
+    never been created yet (this is the agent's own first-ever run) is
+    created here with default cash and zero holdings; it is deliberately
+    NOT seeded with the demo-mode holdings from ensure_demo_holdings
+    (VOO/AAPL/BTC) — those exist purely so a fresh human demo login has
+    something to look at, and would misrepresent the agent's own trading
+    history if applied here.
     """
     portfolio_ids: dict[str, int] = {}
-    for tier, seed in AGENT_USER_SEEDS.items():
-        user = (
-            db.query(User).filter(User.firebase_uid == seed["firebase_uid"]).one_or_none()
+    for tier, tolerance in RISK_TOLERANCE_BY_TIER.items():
+        portfolio = (
+            db.query(Portfolio)
+            .filter(Portfolio.owner_type == "agent", Portfolio.risk_tolerance == tolerance)
+            .one_or_none()
         )
-        if user is None:
-            user = User(
-                firebase_uid=seed["firebase_uid"],
-                email=seed["email"],
-                name=seed["name"],
-                risk_tolerance=seed["risk_tolerance"],
-            )
-            db.add(user)
+        if portfolio is None:
+            portfolio = Portfolio(user_id=None, owner_type="agent", risk_tolerance=tolerance)
+            db.add(portfolio)
             db.commit()
-            db.refresh(user)
-        portfolio = get_or_create_portfolio(db, user)
+            db.refresh(portfolio)
         portfolio_ids[tier] = portfolio.id
     return portfolio_ids
 
 
 def _resolve_risk_tier(portfolio: Portfolio) -> str:
-    tolerance = (portfolio.user.risk_tolerance or "").lower()
-    return RISK_TIER_BY_TOLERANCE.get(tolerance, DEFAULT_RISK_TIER)
+    """Agent portfolios carry risk_tolerance directly; a real user's
+    portfolio has that column NULL and reads it off the owning User
+    instead (portfolio.user is None for agent portfolios, hence the
+    guard)."""
+    tolerance = portfolio.risk_tolerance
+    if not tolerance and portfolio.user is not None:
+        tolerance = portfolio.user.risk_tolerance
+    return RISK_TIER_BY_TOLERANCE.get((tolerance or "").lower(), DEFAULT_RISK_TIER)
 
 
 def _signed_sentiment_score(score: ScoreResult) -> float:
