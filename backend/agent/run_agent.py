@@ -19,16 +19,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime
 from datetime import time as dtime
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from agent.decision_loop import ensure_target_portfolios, run_once
 from app.database import SessionLocal
 
 logger = logging.getLogger("agent.run_agent")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def _configure_logging() -> None:
+    """Always logs to stdout/stderr — under systemd that's captured by
+    journald for free (`journalctl -u britney-agent`), no setup needed.
+    If AGENT_LOG_FILE is set (see backend/deploy/agent.env.example), also
+    writes to that file with rotation, for deployments that want a plain
+    log file too. Unset by default, including in local dev."""
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_file = os.environ.get("AGENT_LOG_FILE")
+    if log_file:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(RotatingFileHandler(log_file, maxBytes=10_000_000, backupCount=5))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+    )
+
+
+_configure_logging()
 
 MARKET_TZ = ZoneInfo("America/New_York")
 MARKET_OPEN = dtime(9, 30)

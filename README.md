@@ -107,6 +107,28 @@ iOS simulator can use `http://localhost:8000` if the API runs on the Mac.
 | POST | `/trading/trade` | Simulated / future Alpaca execution |
 | PATCH | `/settings/auto-invest` | Toggle paper auto-invest |
 
+## Deploying the trading agent
+
+`backend/agent/run_agent.py` (the autonomous agent) deploys to a single
+DigitalOcean droplet with Postgres installed directly on it. Full
+step-by-step in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); the short
+version once a droplet is provisioned (`backend/deploy/provision.sh`):
+
+```bash
+# Status / logs
+ssh root@<droplet-ip> systemctl status britney-agent
+ssh root@<droplet-ip> journalctl -u britney-agent -f
+
+# Restart
+ssh root@<droplet-ip> systemctl restart britney-agent
+
+# Connect to the droplet's Postgres
+ssh root@<droplet-ip> 'sudo -u postgres psql -d britney'
+
+# Ship a code update
+DROPLET_HOST=root@<droplet-ip> backend/deploy/deploy.sh
+```
+
 ## Security notes
 
 - **Never** put OpenAI, Alpaca, or Firebase **server** secrets in the Flutter app.

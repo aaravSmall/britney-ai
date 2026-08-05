@@ -1,0 +1,25 @@
+[Unit]
+Description=britney.ai autonomous trading agent
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=britney
+Group=britney
+WorkingDirectory=/opt/britney-ai/backend
+EnvironmentFile=/opt/britney-ai/backend/.env
+ExecStart=/opt/britney-ai/backend/.venv/bin/python -m agent.run_agent
+Restart=always
+RestartSec=10
+
+# Light sandboxing — the agent only needs the network (Yahoo/CoinGecko/
+# Finnhub/OpenAI) and its own working dir + Postgres over localhost.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/britney-ai /var/log/britney-agent
+
+[Install]
+WantedBy=multi-user.target

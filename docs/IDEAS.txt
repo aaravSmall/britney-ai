@@ -97,7 +97,18 @@ AI
 - Guardrails/eval pass on recommendation output before showing it.
 
 INFRA
-- Deploy backend + Postgres somewhere real (see docs/TECH_STACK.md).
+- PROMOTION CANDIDATE (flagged 2026-08-05): the trading agent's droplet
+  (see docs/DEPLOYMENT.md) runs Postgres directly on the same box rather
+  than a DigitalOcean Managed Database, to keep it free while only the
+  three agent-managed model portfolios (conservative/moderate/aggressive)
+  exist and there's no real user data at stake. Once real users/production
+  data are involved, move to a managed Postgres add-on (~$15/mo at time of
+  writing) for automated backups, point-in-time recovery, easier
+  scaling, and decoupling the database's lifecycle/uptime from the agent
+  process's (right now a bad `systemctl restart britney-agent` or a
+  droplet rebuild takes Postgres down with it).
+- Deploy backend + Postgres somewhere real (see docs/TECH_STACK.md) — the
+  agent now has this (docs/DEPLOYMENT.md), the FastAPI web app still doesn't.
 - CI: no tests or lint pipeline exist yet.
 - Alembic migrations instead of relying on create_all (breaks on schema
   changes to existing DBs — currently working around this by deleting
