@@ -14,15 +14,20 @@ Standalone — doesn't import app.database/app.models:
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
+import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from agent.news_ingestion import NewsArticle, fetch_news
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 MODEL = "gpt-4o-mini"
 
@@ -41,6 +46,15 @@ factual with no clear directional read, or not actually about the company's fund
 # Batch size cap: keeps each request's prompt manageable and bounds how much
 # of a batch is lost/retried if one call's response fails to parse.
 DEFAULT_BATCH_SIZE = 10
+
+# Rate-limit (429) retry policy: exponential backoff (1s, 2s, 4s, ...),
+# capped at RATE_LIMIT_MAX_DELAY, honoring the response's Retry-After
+# header when present instead of guessing. Only 429s retry — other
+# exceptions (auth errors, malformed responses, etc.) fall back to mock
+# immediately since retrying wouldn't help.
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_BASE_DELAY = 1.0
+RATE_LIMIT_MAX_DELAY = 30.0
 
 
 @dataclass
@@ -75,6 +89,28 @@ def _mock_score(article: NewsArticle) -> ScoreResult:
             f"Keyword heuristic on headline/summary for {article.ticker}."
         ),
     )
+
+
+def _retry_after_seconds(exc: RateLimitError) -> float | None:
+    """Seconds to wait before retrying, taken from the 429 response's
+    Retry-After header (either a plain seconds value or an HTTP-date) —
+    None if the header is absent or unparseable, so the caller falls back
+    to its own exponential-backoff guess."""
+    response = exc.response
+    retry_after = response.headers.get("retry-after") if response is not None else None
+    if retry_after is None:
+        return None
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_date = email.utils.parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError):
+        return None
+    if retry_date is None:
+        return None
+    return max(0.0, (retry_date - datetime.now(retry_date.tzinfo)).total_seconds())
 
 
 def _parse_json_array(text: str) -> list[dict[str, Any]]:
@@ -125,9 +161,16 @@ async def score_batch(
 
     settings = get_settings()
     if not settings.openai_api_key:
+        logger.warning(
+            "mock fallback (no API key) — scoring %d article(s) with the offline heuristic.",
+            len(articles),
+        )
         return [_mock_score(a) for a in articles]
 
-    client = OpenAI(api_key=settings.openai_api_key)
+    # max_retries=0: we own retry behavior below (429s get a deliberate
+    # backoff schedule; everything else fails straight to mock), rather
+    # than the SDK silently retrying some errors on its own schedule first.
+    client = OpenAI(api_key=settings.openai_api_key, max_retries=0)
     results: list[ScoreResult] = []
 
     for i in range(0, len(articles), batch_size):
@@ -138,26 +181,72 @@ async def score_batch(
             f"Summary: {a.summary or '(no summary)'}"
             for idx, a in enumerate(chunk)
         )
-        try:
-            resp = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.2,
-            )
-            raw = resp.choices[0].message.content or "[]"
-            parsed = _parse_json_array(raw)
-            if len(parsed) != len(chunk):
-                raise ValueError(
-                    f"Expected {len(chunk)} score objects, got {len(parsed)}"
+        rate_limit_attempt = 0
+        while True:
+            try:
+                resp = client.chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.2,
                 )
-            results.extend(_coerce_result(a, r) for a, r in zip(chunk, parsed))
-        except Exception:
-            # Fall back to the offline heuristic for just this chunk rather
-            # than losing/crashing the whole batch on one bad response.
-            results.extend(_mock_score(a) for a in chunk)
+                raw = resp.choices[0].message.content or "[]"
+                parsed = _parse_json_array(raw)
+                if len(parsed) != len(chunk):
+                    raise ValueError(
+                        f"Expected {len(chunk)} score objects, got {len(parsed)}"
+                    )
+                results.extend(_coerce_result(a, r) for a, r in zip(chunk, parsed))
+                logger.info(
+                    "real LLM success — scored %d article(s) [%d:%d] via %s.",
+                    len(chunk), i, i + len(chunk), MODEL,
+                )
+                break
+            except RateLimitError as exc:
+                rate_limit_attempt += 1
+                if rate_limit_attempt > RATE_LIMIT_MAX_RETRIES:
+                    logger.error(
+                        "mock fallback (API error: %s status=%s: %s) — rate-limit "
+                        "retries exhausted (%d/%d) scoring %d article(s) [%d:%d] "
+                        "with the offline heuristic instead of %s.",
+                        type(exc).__name__, exc.status_code, exc,
+                        RATE_LIMIT_MAX_RETRIES, RATE_LIMIT_MAX_RETRIES,
+                        len(chunk), i, i + len(chunk), MODEL,
+                    )
+                    results.extend(_mock_score(a) for a in chunk)
+                    break
+                delay = _retry_after_seconds(exc)
+                if delay is None:
+                    delay = min(
+                        RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_attempt - 1)),
+                        RATE_LIMIT_MAX_DELAY,
+                    )
+                else:
+                    delay = min(delay, RATE_LIMIT_MAX_DELAY)
+                logger.warning(
+                    "rate limited, retrying (attempt %d/%d, waiting %.1fs) — "
+                    "batch [%d:%d].",
+                    rate_limit_attempt, RATE_LIMIT_MAX_RETRIES, delay, i, i + len(chunk),
+                )
+                await asyncio.sleep(delay)
+            except Exception as exc:
+                # Fall back to the offline heuristic for just this chunk rather
+                # than losing/crashing the whole batch on one bad response. Log
+                # the original exception so billing/auth errors are visibly
+                # distinct from an intentional mock run. Not a RateLimitError,
+                # so no retry — retrying wouldn't help these.
+                status_code = getattr(exc, "status_code", None)
+                status_part = f" status={status_code}" if status_code is not None else ""
+                logger.error(
+                    "mock fallback (API error: %s%s: %s) — scoring %d article(s) [%d:%d] "
+                    "with the offline heuristic instead of %s.",
+                    type(exc).__name__, status_part, exc,
+                    len(chunk), i, i + len(chunk), MODEL,
+                )
+                results.extend(_mock_score(a) for a in chunk)
+                break
 
     return results
 
