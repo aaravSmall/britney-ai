@@ -85,9 +85,28 @@ else
   echo "==> ${ENV_FILE} already exists, leaving it alone."
 fi
 
+echo "==> Verifying ${ENV_FILE} has no unfilled CHANGE_ME placeholders"
+if grep -q "CHANGE_ME" "$ENV_FILE"; then
+  echo "ERROR: ${ENV_FILE} still contains a CHANGE_ME placeholder." >&2
+  echo "       This happens when the '${DB_USER}' role already existed from a" >&2
+  echo "       previous run, so this script left DATABASE_URL untouched instead" >&2
+  echo "       of filling in a real password. Edit DATABASE_URL in ${ENV_FILE}" >&2
+  echo "       by hand (or ALTER ROLE ${DB_USER} WITH PASSWORD '<new-password>'" >&2
+  echo "       and put that password in the URL), then re-run this script." >&2
+  exit 1
+fi
+
 echo "==> Creating log directory (used only if AGENT_LOG_FILE is set in .env)"
 mkdir -p "$LOG_DIR"
 chown "${APP_USER}:${APP_USER}" "$LOG_DIR"
+
+echo "==> Creating database schema (idempotent — create_all only adds missing tables)"
+sudo -u "$APP_USER" bash -c "cd '${APP_DIR}/backend' && '${APP_DIR}/backend/.venv/bin/python' -c '
+from app.database import Base, engine
+import app.models  # noqa: F401 — registers all tables on Base.metadata
+Base.metadata.create_all(bind=engine)
+print(\"    Schema OK.\")
+'"
 
 echo "==> Installing the systemd service"
 cp "${APP_DIR}/backend/deploy/britney-agent.service" /etc/systemd/system/britney-agent.service

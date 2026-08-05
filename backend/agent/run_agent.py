@@ -27,7 +27,7 @@ from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from agent.decision_loop import ensure_target_portfolios, run_once
-from app.database import SessionLocal
+from app.database import Base, SessionLocal, engine
 
 logger = logging.getLogger("agent.run_agent")
 
@@ -111,7 +111,21 @@ async def run_forever(portfolio_ids: list[int] | None = None) -> None:
         await asyncio.sleep(poll_minutes * 60)
 
 
+def _bootstrap_schema() -> None:
+    """Create any missing tables before the agent touches the database.
+
+    On a fresh droplet nothing has ever started the FastAPI app (which
+    normally does this in app/main.py's lifespan), so run_agent.py must be
+    able to create its own schema rather than assume it already exists.
+    create_all() only creates tables that are missing, so this is a no-op
+    on databases that already have them.
+    """
+    logger.info("Ensuring database schema exists (create_all)")
+    Base.metadata.create_all(bind=engine)
+
+
 def _main() -> None:
+    _bootstrap_schema()
     portfolio_ids = [int(a) for a in sys.argv[1:]] or None
     asyncio.run(run_forever(portfolio_ids))
 
