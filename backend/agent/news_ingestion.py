@@ -83,9 +83,19 @@ class NewsArticle:
 
 
 class SeenArticleStore:
-    """Tiny sqlite-backed dedupe cache: article_id -> first-fetched
+    """Tiny sqlite-backed dedupe cache: article_id -> first-processed
     timestamp. Kept separate from the main app DB on purpose (see module
-    docstring) — gitignored like every other *.sqlite3 file in this repo."""
+    docstring) — gitignored like every other *.sqlite3 file in this repo.
+
+    IMPORTANT: fetch_news() does NOT call mark_seen() itself — it only
+    reads has_seen() to filter out already-processed articles. Marking is
+    the caller's job, and should only happen once an article has been
+    fully handled (e.g. decision_loop.py calls mark_seen() only after
+    create_agent_decision() successfully commits for that article's
+    ticker). This is deliberate: if fetch_news() marked articles seen at
+    fetch time, a crash/error anywhere downstream (LLM call, DB write)
+    would silently and permanently lose that article — it would never be
+    fetched again since it's already "seen"."""
 
     def __init__(self, db_path: str | Path | None = None):
         self._path = str(db_path or Path(__file__).parent / ".news_seen.sqlite3")
@@ -225,8 +235,12 @@ async def fetch_news(
 
     Uses Finnhub's free /company-news endpoint when FINNHUB_API_KEY is
     configured; otherwise returns deterministic mock articles so this can
-    be exercised offline. Articles already returned by a previous call
-    (tracked in `store`, persisted across runs) are skipped.
+    be exercised offline. Articles already marked processed in a prior
+    call (tracked in `store`, persisted across runs) are skipped.
+
+    Does NOT mark the articles it returns as seen/processed — see
+    SeenArticleStore's docstring for why. Call `store.mark_seen(article_id)`
+    yourself once each article has been fully handled by your pipeline.
     """
     settings = get_settings()
     tickers = tickers or target_stock_tickers()
@@ -244,7 +258,6 @@ async def fetch_news(
                 if store.has_seen(article.article_id):
                     continue
                 results.append(article)
-                store.mark_seen(article.article_id)
         return results
 
     logger.info("FINNHUB_API_KEY loaded — calling the real Finnhub API.")
@@ -267,7 +280,6 @@ async def fetch_news(
                 if store.has_seen(article.article_id):
                     continue
                 results.append(article)
-                store.mark_seen(article.article_id)
                 new_count += 1
             logger.info(
                 "%s: %d fetched, %d new (%d already seen)",
@@ -296,8 +308,12 @@ async def _main() -> None:
     # never lands in logs. Our own "finnhub company-news request" log line
     # already reports ticker + status code without the token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Standalone smoke-test entry point — nothing downstream consumes these
+    # articles, so intentionally does NOT mark them processed (see
+    # SeenArticleStore's docstring). Running this script is safe to repeat
+    # and won't steal articles from decision_loop.py's real pipeline.
     articles = await fetch_news()
-    print(f"Fetched {len(articles)} new article(s):")
+    print(f"Fetched {len(articles)} unprocessed article(s):")
     for a in articles:
         print(f"  [{a.ticker}] {a.headline!r} — {a.source} ({a.published_at.isoformat()})")
 

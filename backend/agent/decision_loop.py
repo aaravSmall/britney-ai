@@ -33,7 +33,7 @@ from datetime import datetime, time as dtime
 from sqlalchemy.orm import Session
 
 from agent import news_ingestion, sentiment
-from agent.news_ingestion import NewsArticle
+from agent.news_ingestion import NewsArticle, SeenArticleStore
 from agent.sentiment import ScoreResult
 from app.database import SessionLocal
 from app.models import Portfolio, Trade
@@ -256,6 +256,7 @@ async def run_once(portfolio_id: int) -> RunSummary:
     left where a scheduled agent run could hit a missing portfolio.
     """
     db = SessionLocal()
+    store = SeenArticleStore()
     try:
         portfolio = db.query(Portfolio).filter(Portfolio.id == portfolio_id).one_or_none()
         if portfolio is None:
@@ -265,7 +266,14 @@ async def run_once(portfolio_id: int) -> RunSummary:
         profile = RISK_PROFILES[risk_tier]
         tickers = news_ingestion.target_stock_tickers_for(risk_tier)
 
-        articles = await news_ingestion.fetch_news(tickers=tickers)
+        # fetch_news() does not mark articles processed itself (see
+        # SeenArticleStore's docstring) — this loop marks each ticker's
+        # article ids seen only after create_agent_decision() durably
+        # commits a decision for that ticker, below. If anything raises
+        # before that point for a given ticker (execution bug, DB error,
+        # process crash), its articles stay unmarked and are retried on
+        # the next scheduled run instead of being silently lost.
+        articles = await news_ingestion.fetch_news(tickers=tickers, store=store)
 
         decisions_made = 0
         trades_executed = 0
@@ -325,6 +333,13 @@ async def run_once(portfolio_id: int) -> RunSummary:
                 )
                 decisions_made += 1
 
+                # Only now — after the decision is durably committed — mark
+                # this ticker's articles processed. A crash/exception above
+                # this line leaves them unmarked for retry next run instead
+                # of vanishing from the dedupe cache unprocessed.
+                for article_id in article_ids_by_ticker[ticker]:
+                    store.mark_seen(article_id)
+
         db.refresh(portfolio)
         total_value = await _take_snapshot(db, portfolio)
 
@@ -338,6 +353,7 @@ async def run_once(portfolio_id: int) -> RunSummary:
         )
     finally:
         db.close()
+        store.close()
 
 
 async def _main() -> None:

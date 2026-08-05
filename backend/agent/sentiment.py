@@ -163,9 +163,14 @@ async def score_batch(
 
 
 async def _main() -> None:
+    # Standalone smoke-test entry point — scoring here doesn't persist
+    # anywhere, so intentionally does NOT mark articles processed (see
+    # agent.news_ingestion.SeenArticleStore's docstring). Only
+    # decision_loop.py's real pipeline does that, and only after a
+    # decision is durably recorded for the article.
     articles = await fetch_news()
     if not articles:
-        print("No new articles to score (already seen, or none fetched).")
+        print("No unprocessed articles to score (already processed, or none fetched).")
         return
     results = await score_batch(articles)
     for r in results:
