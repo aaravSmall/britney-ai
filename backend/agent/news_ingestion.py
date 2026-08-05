@@ -56,6 +56,13 @@ def target_stock_tickers() -> list[str]:
     return tickers
 
 
+def target_stock_tickers_for(tier: str) -> list[str]:
+    """Stock/ETF tickers for a single risk tier ("conservative" |
+    "moderate" | "aggressive") — crypto entries in that tier are dropped
+    for the same reason as target_stock_tickers()."""
+    return [symbol for symbol, asset_type in TARGET_PORTFOLIOS[tier] if asset_type == "stock"]
+
+
 @dataclass
 class NewsArticle:
     ticker: str

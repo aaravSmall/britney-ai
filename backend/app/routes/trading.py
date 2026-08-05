@@ -6,6 +6,7 @@ from app.services import market_data
 from app.services.portfolio_service import (
     InsufficientFundsError,
     InsufficientHoldingsError,
+    get_or_create_portfolio,
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
@@ -35,9 +36,10 @@ async def place_trade(
 
     if result.status == "filled":
         try:
+            portfolio = get_or_create_portfolio(db, user)
             record_trade_fill(
                 db,
-                user,
+                portfolio,
                 body.symbol,
                 body.asset_type,
                 body.side,

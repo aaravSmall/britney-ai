@@ -32,7 +32,7 @@ def get_or_create_portfolio(db: Session, user: User) -> Portfolio:
 
 def record_trade_fill(
     db: Session,
-    user: User,
+    portfolio: Portfolio,
     symbol: str,
     asset_type: str,
     side: str,
@@ -44,9 +44,12 @@ def record_trade_fill(
     source: str = "user",
 ) -> Trade:
     """Apply a filled paper trade to the portfolio's cash/holdings and log
-    it as a Trade row. `source` distinguishes user-initiated fills (this
-    endpoint) from the autonomous agent's, once that writes here too."""
-    portfolio = get_or_create_portfolio(db, user)
+    it as a Trade row. Callers resolve the Portfolio first (via
+    get_or_create_portfolio for a User, or a direct lookup for the agent's
+    scheduled runs) — this function no longer needs a User at all, so it
+    works identically whether the caller is an authenticated HTTP request
+    or an unattended agent loop. `source` distinguishes user-initiated
+    fills from the autonomous agent's."""
     holding = next(
         (
             h
