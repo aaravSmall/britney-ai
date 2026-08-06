@@ -61,7 +61,9 @@ class PortfolioSnapshot(Base):
     )
     total_value: Mapped[float] = mapped_column(Float)
     cash: Mapped[float] = mapped_column(Float)
-    holdings: Mapped[dict] = mapped_column(JSON, default=dict)  # ticker -> quantity
+    # List of {symbol, quantity, price, value} dicts, one per holding at
+    # capture time — see agent/snapshot.py.
+    holdings: Mapped[list] = mapped_column(JSON, default=list)
 
     portfolio = relationship("Portfolio", back_populates="snapshots")
 

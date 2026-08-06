@@ -2,13 +2,15 @@
 Core decision loop for the britney.ai autonomous trading agent.
 
 Ties together news_ingestion -> sentiment -> per-risk-profile decision
-rules -> trade execution -> AgentDecision logging -> PortfolioSnapshot,
-for one portfolio at a time.
+rules -> trade execution -> AgentDecision logging, for one portfolio at a
+time. Portfolio value snapshots are a separate concern handled by
+agent/snapshot.py, called from run_agent.py once per portfolio after each
+poll cycle regardless of what this module decided.
 
 Unlike news_ingestion.py/sentiment.py, this module is NOT side-effect-free
-by design — its whole job is to write real Trade/AgentDecision/
-PortfolioSnapshot rows — so it does import the FastAPI app's database and
-services rather than staying standalone. It reuses the exact same
+by design — its whole job is to write real Trade/AgentDecision rows — so
+it does import the FastAPI app's database and services rather than
+staying standalone. It reuses the exact same
 execute_trade()/record_trade_fill() path the HTTP /trading/trade endpoint
 uses, just called in-process instead of over HTTP (there's no browser
 session/auth token in a scheduled background run).
@@ -44,7 +46,6 @@ from app.services.portfolio_service import (
     InsufficientHoldingsError,
     record_trade_fill,
 )
-from app.services.portfolio_snapshot_service import create_snapshot
 from app.trading.execution import execute_trade
 
 # Maps User.risk_tolerance ("low" | "medium" | "high", set during
@@ -86,7 +87,6 @@ class RunSummary:
     articles_considered: int
     decisions_made: int
     trades_executed: int
-    snapshot_total_value: float
 
 
 def ensure_target_portfolios(db: Session) -> dict[str, int]:
@@ -222,30 +222,11 @@ async def _execute(
     )
 
 
-async def _take_snapshot(db: Session, portfolio: Portfolio) -> float:
-    holdings_map: dict[str, float] = {}
-    total_value = portfolio.cash_balance
-    for h in portfolio.holdings:
-        price = await market_data.get_price_for_holding(h.symbol, h.asset_type)
-        if price is None:
-            price = h.last_price or h.avg_cost
-        total_value += h.quantity * price
-        holdings_map[h.symbol] = h.quantity
-
-    create_snapshot(
-        db,
-        portfolio_id=portfolio.id,
-        total_value=round(total_value, 2),
-        cash=portfolio.cash_balance,
-        holdings=holdings_map,
-    )
-    return total_value
-
-
 async def run_once(portfolio_id: int) -> RunSummary:
     """Run one full decision cycle for a single portfolio: fetch news for
-    its risk tier's tickers, score it, decide buy/sell/hold per ticker,
-    execute + log each decision, then snapshot the portfolio's value.
+    its risk tier's tickers, score it, decide buy/sell/hold per ticker, and
+    execute + log each decision. Does not itself snapshot the portfolio's
+    value — see agent/snapshot.py, called separately by run_agent.py.
 
     Safe to call for a portfolio that has never been loaded via
     /dashboard: it only reads/writes Portfolio/PortfolioHolding/Trade rows
@@ -340,16 +321,12 @@ async def run_once(portfolio_id: int) -> RunSummary:
                 for article_id in article_ids_by_ticker[ticker]:
                     store.mark_seen(article_id)
 
-        db.refresh(portfolio)
-        total_value = await _take_snapshot(db, portfolio)
-
         return RunSummary(
             portfolio_id=portfolio.id,
             risk_tier=risk_tier,
             articles_considered=len(articles),
             decisions_made=decisions_made,
             trades_executed=trades_executed,
-            snapshot_total_value=round(total_value, 2),
         )
     finally:
         db.close()
@@ -371,7 +348,7 @@ async def _main() -> None:
         print(
             f"portfolio={summary.portfolio_id} tier={summary.risk_tier} "
             f"articles={summary.articles_considered} decisions={summary.decisions_made} "
-            f"trades={summary.trades_executed} total_value=${summary.snapshot_total_value:,.2f}"
+            f"trades={summary.trades_executed}"
         )
 
 

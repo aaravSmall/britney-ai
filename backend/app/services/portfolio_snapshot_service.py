@@ -13,7 +13,7 @@ def create_snapshot(
     portfolio_id: int,
     total_value: float,
     cash: float,
-    holdings: dict[str, float],
+    holdings: list[dict],
     timestamp: datetime | None = None,
 ) -> PortfolioSnapshot:
     row = PortfolioSnapshot(

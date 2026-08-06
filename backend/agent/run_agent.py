@@ -3,7 +3,9 @@ Scheduler entrypoint for the britney.ai trading agent.
 
 Loops agent.decision_loop.run_once() over the agent's target portfolios
 (or explicit portfolio ids), polling more often during US stock market
-hours and less often outside them.
+hours and less often outside them. After each portfolio's decision run —
+whether or not it traded — also calls agent.snapshot.snapshot_capture()
+for that portfolio, so PortfolioSnapshot history tracks the same cadence.
 
 Market-hours check is intentionally simple — weekday + 9:30-16:00 ET, no
 holiday calendar yet — and stock-market-only, matching decision_loop's
@@ -27,6 +29,7 @@ from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from agent.decision_loop import ensure_target_portfolios, run_once
+from agent.snapshot import snapshot_capture
 from app.database import Base, SessionLocal, engine
 
 logger = logging.getLogger("agent.run_agent")
@@ -77,16 +80,27 @@ async def _run_all(portfolio_ids: list[int]) -> None:
         try:
             summary = await run_once(portfolio_id)
             logger.info(
-                "portfolio=%s tier=%s articles=%s decisions=%s trades=%s total_value=$%.2f",
+                "portfolio=%s tier=%s articles=%s decisions=%s trades=%s",
                 summary.portfolio_id,
                 summary.risk_tier,
                 summary.articles_considered,
                 summary.decisions_made,
                 summary.trades_executed,
-                summary.snapshot_total_value,
             )
         except Exception:
             logger.exception("Agent run failed for portfolio %s", portfolio_id)
+
+        # Snapshot regardless of whether the decision run above succeeded,
+        # traded, or failed — a snapshot failure must never block or crash
+        # the trading logic for this or any other portfolio.
+        # snapshot_capture() already logs its own success/skip/failure
+        # loudly and never raises for expected failure modes; this
+        # try/except is just a last-resort backstop against a truly
+        # unexpected crash taking down the rest of the loop.
+        try:
+            await snapshot_capture(portfolio_id)
+        except Exception:
+            logger.exception("Snapshot capture crashed unexpectedly for portfolio %s", portfolio_id)
 
 
 async def run_forever(portfolio_ids: list[int] | None = None) -> None:
