@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TradeRequest(BaseModel):
@@ -13,4 +15,22 @@ class TradeResponse(BaseModel):
     status: str
     simulated: bool
     message: str
+    order_id: str | None = None
+
+
+class TradeOut(BaseModel):
+    """A single row from Trade, as returned by the trade history endpoint."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    timestamp: datetime
+    symbol: str
+    asset_type: str
+    side: str
+    quantity: float
+    price: float
+    status: str
+    simulated: bool
+    source: str
     order_id: str | None = None

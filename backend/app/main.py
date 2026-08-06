@@ -14,6 +14,7 @@ from app.routes import (
     dashboard,
     health,
     onboarding,
+    portfolios,
     recommendations,
     settings as settings_routes,
     trading,
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(onboarding.router)
     app.include_router(dashboard.router)
+    app.include_router(portfolios.router)
     app.include_router(recommendations.router)
     app.include_router(chat.router)
     app.include_router(trading.router)
