@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -13,48 +12,15 @@ import '../services/portfolio_bus.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
 
-/// Market hours used for the "Today" intraday chart.
+/// Market hours used for "Today" x-axis tick placement.
 const int _marketOpenHour = 9;
 const int _marketCloseHour = 17;
 
-/// Synthesizes an intraday path for "Today" from the backend's daily close
-/// values (there's no real per-minute data): flat before the open and after
-/// the close, with a deterministic random walk from [prevClose] to
-/// [todayValue] across the market session in between.
-({List<DateTime> times, List<double> values}) _buildIntradaySeries({
-  required DateTime day,
-  required double prevClose,
-  required double todayValue,
-}) {
-  final dayStart = DateTime(day.year, day.month, day.day);
-  final marketOpen = dayStart.add(const Duration(hours: _marketOpenHour));
-  final dayEnd = dayStart.add(const Duration(hours: 23, minutes: 59));
-
-  final times = <DateTime>[dayStart, marketOpen];
-  final values = <double>[prevClose, prevClose];
-
-  const stepMinutes = 15;
-  final sessionMinutes =
-      (_marketCloseHour - _marketOpenHour) * 60; // 480 (8h session)
-  final steps = sessionMinutes ~/ stepMinutes; // 32
-  final rnd = Random(dayStart.millisecondsSinceEpoch ~/ Duration.millisecondsPerDay);
-  final noiseScale = todayValue.abs() * 0.0035;
-
-  for (var i = 1; i <= steps; i++) {
-    final progress = i / steps;
-    final base = prevClose + (todayValue - prevClose) * progress;
-    // Taper noise to zero at both ends so the walk starts/ends exactly on
-    // the real anchor values instead of jumping.
-    final wiggle = (rnd.nextDouble() - 0.5) * noiseScale * sin(progress * pi);
-    times.add(marketOpen.add(Duration(minutes: i * stepMinutes)));
-    values.add(base + wiggle);
-  }
-
-  times.add(dayEnd);
-  values.add(todayValue);
-
-  return (times: times, values: values);
-}
+/// Below this many real PortfolioSnapshot points in the selected range, a
+/// line/candlestick/waterfall chart would be more misleading than
+/// informative (e.g. a single segment implying a trend from 2 dots) — show
+/// a simpler placeholder instead.
+const int _minPointsForChart = 3;
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -70,6 +36,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _loading = false;
   String? _error;
   Map<String, dynamic>? _dashboard;
+  List<Map<String, dynamic>> _performance = [];
   bool _started = false;
   PortfolioBus? _portfolioBus;
 
@@ -108,10 +75,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final results = await Future.wait([
         api.get('/dashboard'),
         api.get('/users/me'),
+        api.get('/dashboard/performance'),
       ]);
       if (!mounted) return;
       final dashRes = results[0];
       final meRes = results[1];
+      final perfRes = results[2];
       if (dashRes.statusCode == 200) {
         setState(() => _dashboard = jsonDecode(dashRes.body) as Map<String, dynamic>);
       } else {
@@ -120,6 +89,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (meRes.statusCode == 200) {
         final u = jsonDecode(meRes.body) as Map<String, dynamic>;
         setState(() => _auto = u['auto_invest_enabled'] == true);
+      }
+      // Sparse/empty performance history is a valid, expected state (not an
+      // error) — a failed fetch just degrades to the same empty-state UI.
+      if (perfRes.statusCode == 200) {
+        final list = jsonDecode(perfRes.body) as List<dynamic>;
+        setState(
+          () => _performance = list.map((e) => e as Map<String, dynamic>).toList(),
+        );
+      } else {
+        setState(() => _performance = []);
       }
     } catch (e) {
       if (mounted) setState(() => _error = 'Network error: $e');
@@ -147,29 +126,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return 'Good evening';
   }
 
-  /// Backend currently returns a fixed ~30-day daily series; slice its tail
-  /// to approximate shorter ranges (longer ranges fall back to full history).
-  List<Map<String, dynamic>> _sliceForRange(
-    List<Map<String, dynamic>> performance,
+  /// Real snapshots within the selected range's time window, oldest first
+  /// (the backend already returns ascending order). Snapshot cadence is
+  /// uneven — every 15-60min depending on market hours — so this filters by
+  /// elapsed wall-clock time rather than by a fixed point count.
+  List<Map<String, dynamic>> _filterForRange(
+    List<Map<String, dynamic>> snapshots,
     ChartRange range,
   ) {
-    final n = performance.length;
-    int take;
+    if (snapshots.isEmpty) return snapshots;
+    final now = DateTime.now();
+    final DateTime cutoff;
     switch (range) {
       case ChartRange.today:
-        take = 2;
+        cutoff = DateTime(now.year, now.month, now.day);
         break;
       case ChartRange.week:
-        take = 8;
+        cutoff = now.subtract(const Duration(days: 7));
         break;
       case ChartRange.month30:
+        cutoff = now.subtract(const Duration(days: 30));
+        break;
       case ChartRange.ytd:
+        cutoff = DateTime(now.year, 1, 1);
+        break;
       case ChartRange.fiveYear:
-        take = n;
+        cutoff = now.subtract(const Duration(days: 365 * 5));
         break;
     }
-    take = take.clamp(1, n);
-    return performance.sublist(n - take);
+    return [
+      for (final s in snapshots)
+        if (!DateTime.parse(s['timestamp'] as String).toLocal().isBefore(cutoff))
+          s,
+    ];
   }
 
   @override
@@ -215,34 +204,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     final dashboard = _dashboard!;
-    final performance = (dashboard['performance'] as List<dynamic>)
-        .map((e) => e as Map<String, dynamic>)
-        .toList();
     final isIntraday = _range == ChartRange.today;
-    final List<double> values;
-    final List<DateTime> times;
-    if (isIntraday) {
-      final todayValue = (performance.last['value'] as num).toDouble();
-      final prevClose = performance.length >= 2
-          ? (performance[performance.length - 2]['value'] as num).toDouble()
-          : todayValue;
-      final todayDate = DateTime.parse(performance.last['date'] as String);
-      final intraday = _buildIntradaySeries(
-        day: todayDate,
-        prevClose: prevClose,
-        todayValue: todayValue,
-      );
-      values = intraday.values;
-      times = intraday.times;
-    } else {
-      final sliced = _sliceForRange(performance, _range);
-      values = [for (final p in sliced) (p['value'] as num).toDouble()];
-      times = [for (final p in sliced) DateTime.parse(p['date'] as String)];
-    }
-    final firstValue = values.first;
-    final lastValue = values.last;
-    final periodChangePct =
-        firstValue != 0 ? (lastValue - firstValue) / firstValue * 100 : 0.0;
+    final filtered = _filterForRange(_performance, _range);
+    final values = [
+      for (final p in filtered) (p['total_value'] as num).toDouble(),
+    ];
+    final times = [
+      for (final p in filtered) DateTime.parse(p['timestamp'] as String).toLocal(),
+    ];
+    final periodChangePct = values.length >= 2 && values.first != 0
+        ? (values.last - values.first) / values.first * 100
+        : 0.0;
     final total = (dashboard['total_portfolio_value'] as num).toDouble();
     final cash = (dashboard['cash_balance'] as num).toDouble();
     final holdings = (dashboard['holdings'] as List<dynamic>)
@@ -366,6 +338,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               times: times,
               isIntraday: isIntraday,
               use24Hour: use24Hour,
+              hasAnyHistory: _performance.isNotEmpty,
             ),
             const SizedBox(height: 16),
             Card(
@@ -482,6 +455,7 @@ class _SummaryCard extends StatefulWidget {
     required this.times,
     required this.isIntraday,
     required this.use24Hour,
+    required this.hasAnyHistory,
   });
 
   final ChartRange range;
@@ -493,6 +467,10 @@ class _SummaryCard extends StatefulWidget {
   final List<DateTime> times;
   final bool isIntraday;
   final bool use24Hour;
+  // Whether the portfolio has any PortfolioSnapshot rows at all, regardless
+  // of the selected range — distinguishes "nothing captured yet" from
+  // "nothing captured in this particular range" for the placeholder copy.
+  final bool hasAnyHistory;
 
   @override
   State<_SummaryCard> createState() => _SummaryCardState();
@@ -501,8 +479,10 @@ class _SummaryCard extends StatefulWidget {
 class _SummaryCardState extends State<_SummaryCard> {
   int? _scrubIndex;
 
+  bool get _hasChart => widget.values.length >= _minPointsForChart;
+
   void _updateScrub(double localX, double width) {
-    if (widget.times.length <= 1 || width <= 0) return;
+    if (!_hasChart || width <= 0) return;
     final frac = (localX / width).clamp(0.0, 1.0);
     final idx = _nearestIndexForFrac(frac, widget.times);
     if (idx != _scrubIndex) setState(() => _scrubIndex = idx);
@@ -525,8 +505,9 @@ class _SummaryCardState extends State<_SummaryCard> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
-    final scrubbing = _scrubIndex != null;
-    final start = widget.values.first;
+    final hasChart = _hasChart;
+    final scrubbing = hasChart && _scrubIndex != null;
+    final start = hasChart ? widget.values.first : 0.0;
     final displayValue = scrubbing ? widget.values[_scrubIndex!] : widget.totalValue;
     final displayPct = scrubbing
         ? (start != 0
@@ -584,119 +565,168 @@ class _SummaryCardState extends State<_SummaryCard> {
                   'Cash \$${widget.cash.toStringAsFixed(2)}',
                   style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
-                const SizedBox(width: 14),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: positive
-                        ? AppTheme.accent.withValues(alpha: 0.12)
-                        : AppTheme.danger.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '${positive ? '+' : ''}${displayPct.toStringAsFixed(2)}% $chipLabel',
-                    style: TextStyle(
-                      color: positive ? AppTheme.accent : AppTheme.danger,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
+                if (hasChart) ...[
+                  const SizedBox(width: 14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: positive
+                          ? AppTheme.accent.withValues(alpha: 0.12)
+                          : AppTheme.danger.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${positive ? '+' : ''}${displayPct.toStringAsFixed(2)}% $chipLabel',
+                      style: TextStyle(
+                        color: positive ? AppTheme.accent : AppTheme.danger,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
             const SizedBox(height: 20),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final width = constraints.maxWidth;
-                final xForIndex = widget.times.length > 1
-                    ? _fracFor(
-                          widget.times[_scrubIndex ?? 0],
-                          widget.times.first,
-                          widget.times.last,
-                        ) *
-                        width
-                    : width / 2;
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  // Horizontal-only recognizers (not onPan*) so this plays
-                  // nicely with the enclosing vertical ListView's scroll
-                  // gesture instead of fighting it for the arena.
-                  onHorizontalDragStart: (d) =>
-                      _updateScrub(d.localPosition.dx, width),
-                  onHorizontalDragUpdate: (d) =>
-                      _updateScrub(d.localPosition.dx, width),
-                  onHorizontalDragEnd: (_) => _endScrub(),
-                  onHorizontalDragCancel: _endScrub,
-                  onTapDown: (d) => _updateScrub(d.localPosition.dx, width),
-                  onTapUp: (_) => _endScrub(),
-                  child: SizedBox(
-                    height: 180,
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          // fl_chart still occupies hit-test space even with
-                          // its own touch data disabled; ignore it so only
-                          // the GestureDetector above ever sees pointer
-                          // events, regardless of chart kind.
-                          child: IgnorePointer(
-                            child: switch (widget.chartKind) {
-                              ChartKind.line => _LineChartView(
-                                  values: widget.values,
-                                  times: widget.times,
-                                ),
-                              ChartKind.candlestick => _CandlestickChartView(
-                                  values: widget.values,
-                                  times: widget.times,
-                                ),
-                              ChartKind.waterfall => _WaterfallChartView(
-                                  values: widget.values,
-                                  times: widget.times,
-                                ),
-                            },
-                          ),
-                        ),
-                        if (scrubbing) ...[
+            if (hasChart) ...[
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.maxWidth;
+                  final xForIndex = widget.times.length > 1
+                      ? _fracFor(
+                            widget.times[_scrubIndex ?? 0],
+                            widget.times.first,
+                            widget.times.last,
+                          ) *
+                          width
+                      : width / 2;
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    // Horizontal-only recognizers (not onPan*) so this plays
+                    // nicely with the enclosing vertical ListView's scroll
+                    // gesture instead of fighting it for the arena.
+                    onHorizontalDragStart: (d) =>
+                        _updateScrub(d.localPosition.dx, width),
+                    onHorizontalDragUpdate: (d) =>
+                        _updateScrub(d.localPosition.dx, width),
+                    onHorizontalDragEnd: (_) => _endScrub(),
+                    onHorizontalDragCancel: _endScrub,
+                    onTapDown: (d) => _updateScrub(d.localPosition.dx, width),
+                    onTapUp: (_) => _endScrub(),
+                    child: SizedBox(
+                      height: 180,
+                      child: Stack(
+                        children: [
                           Positioned.fill(
+                            // fl_chart still occupies hit-test space even with
+                            // its own touch data disabled; ignore it so only
+                            // the GestureDetector above ever sees pointer
+                            // events, regardless of chart kind.
                             child: IgnorePointer(
-                              child: CustomPaint(
-                                painter: _ScrubLinePainter(
-                                  x: xForIndex,
-                                  color: AppTheme.textSecondaryOf(context),
+                              child: switch (widget.chartKind) {
+                                ChartKind.line => _LineChartView(
+                                    values: widget.values,
+                                    times: widget.times,
+                                  ),
+                                ChartKind.candlestick => _CandlestickChartView(
+                                    values: widget.values,
+                                    times: widget.times,
+                                  ),
+                                ChartKind.waterfall => _WaterfallChartView(
+                                    values: widget.values,
+                                    times: widget.times,
+                                  ),
+                              },
+                            ),
+                          ),
+                          if (scrubbing) ...[
+                            Positioned.fill(
+                              child: IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _ScrubLinePainter(
+                                    x: xForIndex,
+                                    color: AppTheme.textSecondaryOf(context),
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                          Positioned(
-                            top: 0,
-                            left: (xForIndex - 54).clamp(0.0, width - 108),
-                            child: IgnorePointer(
-                              child: _ScrubTooltip(
-                                value: widget.values[_scrubIndex!],
-                                label: _chartLabel(
-                                  widget.times[_scrubIndex!],
-                                  isIntraday: widget.isIntraday,
-                                  use24Hour: widget.use24Hour,
+                            Positioned(
+                              top: 0,
+                              left: (xForIndex - 54).clamp(0.0, width - 108),
+                              child: IgnorePointer(
+                                child: _ScrubTooltip(
+                                  value: widget.values[_scrubIndex!],
+                                  label: _chartLabel(
+                                    widget.times[_scrubIndex!],
+                                    isIntraday: widget.isIntraday,
+                                    use24Hour: widget.use24Hour,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
-                  ),
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            _ChartXAxisLabels(
-              times: widget.times,
-              isIntraday: widget.isIntraday,
-              use24Hour: widget.use24Hour,
-            ),
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              _ChartXAxisLabels(
+                times: widget.times,
+                isIntraday: widget.isIntraday,
+                use24Hour: widget.use24Hour,
+              ),
+            ] else
+              _SparseHistoryPlaceholder(
+                message: !widget.hasAnyHistory
+                    ? 'Performance history will appear here once the agent starts trading.'
+                    : widget.values.isEmpty
+                        ? 'No snapshots yet for this range — try a wider range.'
+                        : 'Not enough history yet to chart — showing current value only.',
+              ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown in place of the chart when there are fewer than
+/// [_minPointsForChart] real snapshots in the selected range — a line drawn
+/// through 1-2 points would imply a trend that isn't actually there.
+class _SparseHistoryPlaceholder extends StatelessWidget {
+  const _SparseHistoryPlaceholder({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    return SizedBox(
+      height: 180,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.show_chart_rounded,
+                size: 28,
+                color: AppTheme.textSecondaryOf(context),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+              ),
+            ],
+          ),
         ),
       ),
     );

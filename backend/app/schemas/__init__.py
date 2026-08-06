@@ -1,5 +1,5 @@
 from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse
-from app.schemas.dashboard import DashboardResponse, HoldingOut, PerformancePoint
+from app.schemas.dashboard import DashboardResponse, HoldingOut, SnapshotPointOut
 from app.schemas.onboarding import OnboardingUpdate
 from app.schemas.recommendation import RecommendationRequest, RecommendationResponse
 from app.schemas.trading import TradeRequest, TradeResponse
@@ -11,7 +11,7 @@ __all__ = [
     "ChatResponse",
     "DashboardResponse",
     "HoldingOut",
-    "PerformancePoint",
+    "SnapshotPointOut",
     "OnboardingUpdate",
     "RecommendationRequest",
     "RecommendationResponse",

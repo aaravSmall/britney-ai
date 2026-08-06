@@ -1,4 +1,4 @@
-/// Time horizon for the portfolio performance chart (demo data).
+/// Time horizon for the portfolio performance chart.
 enum ChartRange {
   today,
   week,

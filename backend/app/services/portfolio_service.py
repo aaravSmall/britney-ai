@@ -1,12 +1,11 @@
 """Aggregate portfolio values and performance series for dashboard."""
 
 from datetime import datetime, timedelta
-from random import Random
 
 from sqlalchemy.orm import Session
 
-from app.models import Portfolio, PortfolioHolding, Trade, User
-from app.schemas.dashboard import DashboardResponse, HoldingOut, PerformancePoint
+from app.models import Portfolio, PortfolioHolding, PortfolioSnapshot, Trade, User
+from app.schemas.dashboard import DashboardResponse, HoldingOut
 from app.services import market_data
 
 
@@ -164,31 +163,36 @@ async def build_dashboard(db: Session, user: User) -> DashboardResponse:
             )
         )
 
-    # Mock performance: deterministic curve from user id
-    rng = Random(user.id)
-    points: list[PerformancePoint] = []
-    base = max(total_mv + cash, 1000.0)
-    for i in range(30, -1, -1):
-        d = datetime.utcnow() - timedelta(days=i)
-        jitter = 1.0 + (rng.random() - 0.48) * 0.02
-        base *= jitter
-        points.append(
-            PerformancePoint(date=d.strftime("%Y-%m-%d"), value=round(base, 2))
-        )
-
-    day_change = None
-    if len(points) >= 2:
-        prev, last = points[-2].value, points[-1].value
-        if prev:
-            day_change = round((last - prev) / prev * 100, 2)
+    total_value = total_mv + cash
+    day_change = _day_change_pct(db, portfolio.id, total_value)
 
     return DashboardResponse(
         cash_balance=cash,
-        total_portfolio_value=round(total_mv + cash, 2),
+        total_portfolio_value=round(total_value, 2),
         day_change_pct=day_change,
         holdings=holdings_out,
-        performance=points,
     )
+
+
+def _day_change_pct(
+    db: Session, portfolio_id: int, current_total: float
+) -> float | None:
+    """% change vs. the most recent real PortfolioSnapshot at least 24h
+    old. None until the agent has been snapshotting this portfolio for a
+    full day — there's no fake fallback series to fall back on anymore."""
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    day_ago = (
+        db.query(PortfolioSnapshot)
+        .filter(
+            PortfolioSnapshot.portfolio_id == portfolio_id,
+            PortfolioSnapshot.timestamp <= cutoff,
+        )
+        .order_by(PortfolioSnapshot.timestamp.desc())
+        .first()
+    )
+    if day_ago is None or not day_ago.total_value:
+        return None
+    return round((current_total - day_ago.total_value) / day_ago.total_value * 100, 2)
 
 
 def portfolio_summary_text(db: Session, user: User) -> str:
