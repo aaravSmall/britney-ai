@@ -18,6 +18,7 @@ from app.routes import (
     portfolios,
     recommendations,
     settings as settings_routes,
+    stocks,
     trading,
     users,
 )
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(trading.router)
     app.include_router(settings_routes.router)
+    app.include_router(stocks.router)
     return app
 
 
