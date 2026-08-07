@@ -40,4 +40,9 @@ class ApiService {
       body: body == null ? null : jsonEncode(body),
     );
   }
+
+  Future<http.Response> delete(String path) async {
+    final uri = Uri.parse('${ApiConfig.baseUrl}$path');
+    return http.delete(uri, headers: await _headers());
+  }
 }

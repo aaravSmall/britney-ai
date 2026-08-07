@@ -7,6 +7,7 @@ import '../screens/dashboard_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/recommendations_screen.dart';
+import '../screens/stock_detail_screen.dart';
 import '../screens/trade_history_screen.dart';
 import '../services/auth_controller.dart';
 import '../theme/app_theme.dart';
@@ -41,6 +42,17 @@ GoRouter createRouter(AuthController auth) {
         builder: (_, state) {
           final id = int.tryParse(state.pathParameters['portfolioId'] ?? '');
           return TradeHistoryScreen(portfolioId: id);
+        },
+      ),
+      GoRoute(
+        // Standalone by design (see stock_detail_screen.dart) — search
+        // results, the favorites list, and any future entry point all
+        // push this same route with just a ticker, same as
+        // /trade-history/:portfolioId above.
+        path: '/stock/:ticker',
+        builder: (_, state) {
+          final ticker = state.pathParameters['ticker'] ?? '';
+          return StockDetailScreen(ticker: ticker);
         },
       ),
       // StatefulShellRoute.indexedStack keeps each tab's widget tree (and
