@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../screens/account_screen.dart';
 import '../screens/chat_screen.dart';
 import '../screens/dashboard_screen.dart';
+import '../screens/favorites_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/recommendations_screen.dart';
@@ -77,6 +78,11 @@ GoRouter createRouter(AuthController auth) {
           StatefulShellBranch(
             routes: [
               GoRoute(path: '/home', builder: (_, __) => const DashboardScreen()),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(path: '/favorites', builder: (_, __) => const FavoritesScreen()),
             ],
           ),
           StatefulShellBranch(
@@ -177,6 +183,11 @@ class _MainShellState extends State<_MainShell>
             icon: Icon(Icons.pie_chart_outline),
             selectedIcon: Icon(Icons.pie_chart),
             label: 'Portfolio',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.favorite_border),
+            selectedIcon: Icon(Icons.favorite),
+            label: 'Favorites',
           ),
           NavigationDestination(
             icon: Icon(Icons.auto_awesome_outlined),
