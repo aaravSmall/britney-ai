@@ -79,6 +79,22 @@ RISK_PROFILES: dict[str, dict[str, float | int]] = {
 # each agent-managed model portfolio, one per tier.
 RISK_TOLERANCE_BY_TIER: dict[str, str] = {v: k for k, v in RISK_TIER_BY_TOLERANCE.items()}
 
+# Ticker -> asset_type ("stock" | "crypto"), derived from
+# news_ingestion.TARGET_PORTFOLIOS rather than duplicated by hand — used
+# by _execute() to price/execute/record each ticker correctly instead of
+# assuming "stock". Deliberately keyed by ticker, not risk tier: all three
+# tiers hold both a stock/ETF ticker and a crypto ticker, so tier alone
+# can't tell you which one a given decision is for.
+_ASSET_TYPE_BY_TICKER: dict[str, str] = {
+    symbol: asset_type
+    for assets in news_ingestion.TARGET_PORTFOLIOS.values()
+    for symbol, asset_type in assets
+}
+
+
+def _asset_type_for(ticker: str) -> str:
+    return _ASSET_TYPE_BY_TICKER.get(ticker, "stock")
+
 
 @dataclass
 class RunSummary:
@@ -175,7 +191,11 @@ def _decide(
         return "buy", ""
 
     if score.sentiment == "bearish":
-        holding = next((h for h in portfolio.holdings if h.symbol == ticker), None)
+        asset_type = _asset_type_for(ticker)
+        holding = next(
+            (h for h in portfolio.holdings if h.symbol == ticker and h.asset_type == asset_type),
+            None,
+        )
         if not holding or holding.quantity <= 0:
             return "hold", f"Bearish signal but no existing {ticker} position to sell."
         return "sell", ""
@@ -190,7 +210,8 @@ async def _execute(
     side: str,
     profile: dict[str, float | int],
 ) -> Trade:
-    price = await market_data.get_price_for_holding(ticker, "stock")
+    asset_type = _asset_type_for(ticker)
+    price = await market_data.get_price_for_holding(ticker, asset_type)
     if price is None:
         raise ValueError(f"No price available for {ticker}")
 
@@ -198,13 +219,15 @@ async def _execute(
         dollar_amount = portfolio.cash_balance * profile["position_size_pct"]
         quantity = round(dollar_amount / price, 6)
     else:  # sell
-        holding = next(h for h in portfolio.holdings if h.symbol == ticker)
+        holding = next(
+            h for h in portfolio.holdings if h.symbol == ticker and h.asset_type == asset_type
+        )
         quantity = round(holding.quantity * profile["position_size_pct"], 6)
 
     if quantity <= 0:
         raise ValueError(f"Computed {side} quantity for {ticker} was zero.")
 
-    result = execute_trade(ticker, "stock", side, quantity, simulate_only=True)
+    result = execute_trade(ticker, asset_type, side, quantity, simulate_only=True)
     if result.status != "filled":
         raise ValueError(f"Execution did not fill: {result.message}")
 
@@ -212,7 +235,7 @@ async def _execute(
         db,
         portfolio,
         ticker,
-        "stock",
+        asset_type,
         side,
         quantity,
         price,
@@ -245,16 +268,24 @@ async def run_once(portfolio_id: int) -> RunSummary:
 
         risk_tier = _resolve_risk_tier(portfolio)
         profile = RISK_PROFILES[risk_tier]
-        tickers = news_ingestion.target_stock_tickers_for(risk_tier)
+        stock_tickers = news_ingestion.target_stock_tickers_for(risk_tier)
+        crypto_tickers = news_ingestion.target_crypto_tickers_for(risk_tier)
 
-        # fetch_news() does not mark articles processed itself (see
-        # SeenArticleStore's docstring) — this loop marks each ticker's
-        # article ids seen only after create_agent_decision() durably
-        # commits a decision for that ticker, below. If anything raises
-        # before that point for a given ticker (execution bug, DB error,
-        # process crash), its articles stay unmarked and are retried on
-        # the next scheduled run instead of being silently lost.
-        articles = await news_ingestion.fetch_news(tickers=tickers, store=store)
+        # fetch_news()/fetch_crypto_news() do not mark articles processed
+        # themselves (see SeenArticleStore's docstring) — this loop marks
+        # each ticker's article ids seen only after create_agent_decision()
+        # durably commits a decision for that ticker, below. If anything
+        # raises before that point for a given ticker (execution bug, DB
+        # error, process crash), its articles stay unmarked and are
+        # retried on the next scheduled run instead of being silently
+        # lost. Two separate fetch calls (not a merged ticker list) since
+        # stock and crypto news come from different providers with
+        # different request shapes — see news_ingestion.py.
+        stock_articles = await news_ingestion.fetch_news(tickers=stock_tickers, store=store)
+        crypto_articles = await news_ingestion.fetch_crypto_news(
+            tickers=crypto_tickers, store=store
+        )
+        articles = stock_articles + crypto_articles
 
         decisions_made = 0
         trades_executed = 0
