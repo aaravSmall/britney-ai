@@ -35,9 +35,16 @@ def verify_id_token(id_token: str) -> dict[str, Any]:
     """Returns decoded token claims including 'uid', 'email'."""
     settings = get_settings()
     if settings.auth_disabled:
-        # Dev-only: trust client-sent mock (still require Authorization header format)
+        # Dev-only: trust client-sent mock (still require Authorization
+        # header format). uid is derived from the token value itself
+        # (not real verification) rather than a single fixed "dev-user",
+        # so AUTH_DISABLED mode can still distinguish different callers —
+        # needed to test/demo the owner-only 403 path locally without real
+        # Firebase. The actual frontend demo mode always sends the same
+        # fixed token (see auth_controller.dart's `demoToken`), so its
+        # user identity is unaffected and stays stable across requests.
         _ensure_firebase()
-        return {"uid": "dev-user", "email": "dev@britney.ai.local"}
+        return {"uid": f"dev-{id_token}", "email": f"dev-{id_token}@britney.ai.local"}
     if not settings.firebase_credentials_path:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

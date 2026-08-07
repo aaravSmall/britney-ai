@@ -2,11 +2,12 @@
 views for the dashboard's portfolio switcher, etc.)."""
 
 from datetime import datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from agent.decision_loop import ensure_target_portfolios
-from app.deps import CurrentUser, DbSession
+from app.deps import DbSession, OptionalCurrentUser, resolve_current_user
 from app.models import Portfolio, PortfolioSnapshot, Trade
 from app.schemas.dashboard import DashboardResponse, PortfolioListItem, SnapshotPointOut
 from app.schemas.trading import TradeOut
@@ -35,18 +36,40 @@ _RANGE_WINDOWS: dict[str, timedelta] = {
 }
 
 
+def _require_owner_if_user_portfolio(
+    db,
+    portfolio: Portfolio,
+    authorization: str | None,
+) -> None:
+    """Agent portfolios (owner_type="agent") stay publicly readable as a
+    transparency feature — no auth required. User portfolios require a
+    valid token AND that the token's user owns this exact portfolio: 401
+    if the token is missing/invalid, 403 (not 404 — no need to hide
+    existence) if it's valid but for a different user."""
+    if portfolio.owner_type != "user":
+        return
+    current_user = resolve_current_user(db, authorization)
+    if portfolio.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your portfolio")
+
+
 @router.get("", response_model=list[PortfolioListItem])
-def list_portfolios(db: DbSession, user: CurrentUser) -> list[PortfolioListItem]:
+def list_portfolios(db: DbSession, user: OptionalCurrentUser) -> list[PortfolioListItem]:
     """Portfolios the dashboard's portfolio switcher can show: the
-    caller's own, plus the agent's three risk-tier model portfolios
-    (created here on first call if they don't exist yet, same as the
-    agent's own scheduler does — see ensure_target_portfolios)."""
-    my_portfolio = get_or_create_portfolio(db, user)
-    items = [
-        PortfolioListItem(
-            id=my_portfolio.id, label="My Portfolio", owner_type="user", risk_tolerance=None
+    agent's three risk-tier model portfolios always (created here on
+    first call if they don't exist yet, same as the agent's own
+    scheduler does — see ensure_target_portfolios), plus the caller's own
+    if authenticated. Unauthenticated callers just get the three agent
+    portfolios — no error — so the switcher still works for a logged-out
+    demo view of the agent's performance."""
+    items: list[PortfolioListItem] = []
+    if user is not None:
+        my_portfolio = get_or_create_portfolio(db, user)
+        items.append(
+            PortfolioListItem(
+                id=my_portfolio.id, label="My Portfolio", owner_type="user", risk_tolerance=None
+            )
         )
-    ]
     agent_ids = ensure_target_portfolios(db)
     for tier, portfolio_id in agent_ids.items():
         items.append(
@@ -61,14 +84,19 @@ def list_portfolios(db: DbSession, user: CurrentUser) -> list[PortfolioListItem]
 
 
 @router.get("/{portfolio_id}/summary", response_model=DashboardResponse)
-async def get_portfolio_summary(portfolio_id: int, db: DbSession) -> DashboardResponse:
+async def get_portfolio_summary(
+    portfolio_id: int,
+    db: DbSession,
+    authorization: Annotated[str | None, Header()] = None,
+) -> DashboardResponse:
     """Dashboard-equivalent view (cash, holdings, total value, day change)
-    for any portfolio — including the agent's — not just the caller's
-    own. No auth on portfolio_id itself, same known gap as GET
-    /portfolios/{id}/trades below (deferred to Sprint 4/5)."""
+    for any portfolio. Agent portfolios are publicly readable; a user
+    portfolio requires the owning user's token (401 missing/invalid, 403
+    wrong user)."""
     portfolio = db.get(Portfolio, portfolio_id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+    _require_owner_if_user_portfolio(db, portfolio, authorization)
     return await build_portfolio_summary(db, portfolio)
 
 
@@ -92,12 +120,16 @@ def get_portfolio_performance(
     until: datetime | None = Query(
         None, description="Only snapshots at/before this ISO timestamp."
     ),
+    authorization: Annotated[str | None, Header()] = None,
 ) -> list[PortfolioSnapshot]:
     """Same shape and semantics as GET /dashboard/performance, for any
-    portfolio_id rather than just the caller's own."""
+    portfolio_id rather than just the caller's own. Agent portfolios are
+    publicly readable; a user portfolio requires the owning user's token
+    (401 missing/invalid, 403 wrong user)."""
     portfolio = db.get(Portfolio, portfolio_id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+    _require_owner_if_user_portfolio(db, portfolio, authorization)
 
     effective_since = since
     if effective_since is None and range_:
@@ -129,12 +161,16 @@ def get_trade_history(
     until: datetime | None = Query(
         None, description="Only trades at/before this ISO timestamp."
     ),
+    authorization: Annotated[str | None, Header()] = None,
 ) -> list[Trade]:
     """Trade history for a portfolio, newest first. 404s if the portfolio
-    doesn't exist; returns [] if it exists but has no trades yet."""
+    doesn't exist; returns [] if it exists but has no trades yet. Agent
+    portfolios are publicly readable; a user portfolio requires the
+    owning user's token (401 missing/invalid, 403 wrong user)."""
     portfolio = db.get(Portfolio, portfolio_id)
     if portfolio is None:
         raise HTTPException(status_code=404, detail="Portfolio not found")
+    _require_owner_if_user_portfolio(db, portfolio, authorization)
 
     query = db.query(Trade).filter(Trade.portfolio_id == portfolio_id)
     if source:
