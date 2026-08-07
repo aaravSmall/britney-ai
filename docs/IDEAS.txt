@@ -78,11 +78,22 @@ AGENT — CRYPTO NEWS
   confirmed the full path end-to-end — real CoinGecko pricing, correct
   fractional quantity, asset_type="crypto" recorded, cash/holdings
   updated correctly both directions.
-- STILL OPEN: crypto trades 24/7 with no market-hours gating like stocks
-  implicitly get (see run_agent.py's is_market_hours() scheduler gate) —
-  the same poll cadence shouldn't just be reused verbatim; crypto news
-  can matter as much at 3am as 3pm. Not touched by the wiring-in above
-  (out of scope — run_agent.py's scheduler, not decision_loop.py itself).
+- CORRECTION (2026-08-07): the note below (previously "STILL OPEN") was
+  wrong — investigated and verified run_agent.py does NOT gate polling on
+  is_market_hours(). run_forever()'s while-loop calls _run_all() (which
+  runs decision_loop.run_once() — stock AND crypto tickers alike, no
+  asset-type branching — for every portfolio) unconditionally on every
+  iteration; is_market_hours() is only consulted afterward, to pick the
+  sleep duration before the next iteration (15min market-hours /
+  60min otherwise). So crypto tickers already get polled 24/7, just on
+  the coarser 60min cadence outside 9:30-16:00 ET weekdays, same as
+  stock tickers do. Verified live: forced is_market_hours() to always
+  return False (simulating weekend/after-hours) and ran the real
+  run_forever() loop (sleep constants shrunk 60x/15x purely for a fast
+  test, source unmodified) — BTC/ETH/SOL were fetched/scored/decided on
+  the very first "after-hours/weekend"-logged cycle, and the loop kept
+  firing every cycle thereafter without interruption. No code change
+  needed or made.
 
 AI
 - Stream chat responses instead of waiting for the full completion.
