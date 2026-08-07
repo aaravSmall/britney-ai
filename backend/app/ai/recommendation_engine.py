@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from openai import OpenAI
+from starlette.concurrency import run_in_threadpool
 
 from agent import news_ingestion, sentiment
 from agent.news_ingestion import NewsArticle, SeenArticleStore
@@ -469,7 +470,12 @@ Build a diversified portfolio from the candidate symbols above (allocations summ
 
     client = OpenAI(api_key=settings.openai_api_key)
     try:
-        resp = client.chat.completions.create(
+        # The OpenAI SDK's default client is sync (blocking network I/O);
+        # this route handler is async def, so a direct call here would
+        # block the whole event loop — and every other concurrent
+        # request — for the duration of the API call.
+        resp = await run_in_threadpool(
+            client.chat.completions.create,
             model=MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM},

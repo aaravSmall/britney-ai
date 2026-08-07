@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from openai import OpenAI, RateLimitError
+from starlette.concurrency import run_in_threadpool
 
 from agent.news_ingestion import NewsArticle, fetch_news
 from app.config import get_settings
@@ -184,7 +185,13 @@ async def score_batch(
         rate_limit_attempt = 0
         while True:
             try:
-                resp = client.chat.completions.create(
+                # The OpenAI SDK's default client is sync (blocking network
+                # I/O) — this function is async and runs on the shared event
+                # loop (called from app.ai.recommendation_engine's request
+                # path), so a direct call here would stall every other
+                # in-flight request for the duration of the API call.
+                resp = await run_in_threadpool(
+                    client.chat.completions.create,
                     model=MODEL,
                     messages=[
                         {"role": "system", "content": SYSTEM},
