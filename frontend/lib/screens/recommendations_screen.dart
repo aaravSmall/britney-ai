@@ -4,8 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_service.dart';
-import '../services/portfolio_bus.dart';
 import '../theme/app_theme.dart';
+import '../widgets/buy_sell_bottom_sheet.dart';
 
 class RecommendationsScreen extends StatefulWidget {
   const RecommendationsScreen({super.key});
@@ -49,87 +49,12 @@ class _RecommendationsScreenState extends State<RecommendationsScreen> {
     }
   }
 
-  Future<void> _trade(Map<String, dynamic> asset, String side) async {
-    final symbol = asset['symbol'] as String;
-    final assetType = asset['asset_type'] as String? ?? 'stock';
-    final qty = await _promptQuantity(symbol: symbol, side: side);
-    if (qty == null || !mounted) return;
-
-    final api = context.read<ApiService>();
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final res = await api.post('/trading/trade', {
-        'symbol': symbol,
-        'asset_type': assetType,
-        'side': side,
-        'quantity': qty,
-        'simulate_only': true,
-      });
-      if (!mounted) return;
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        final body = jsonDecode(res.body) as Map<String, dynamic>;
-        context.read<PortfolioBus>().notifyTraded();
-        messenger.showSnackBar(
-          SnackBar(content: Text(body['message'] as String? ?? 'Trade filled')),
-        );
-      } else {
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(_errorDetail(res.body)),
-            backgroundColor: AppTheme.danger,
-          ),
-        );
-      }
-    } catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('Network error: $e'), backgroundColor: AppTheme.danger),
-      );
-    }
-  }
-
-  String _errorDetail(String body) {
-    try {
-      final decoded = jsonDecode(body);
-      if (decoded is Map && decoded['detail'] != null) {
-        return decoded['detail'].toString();
-      }
-    } catch (_) {
-      // Fall through to generic message below.
-    }
-    return 'Trade failed';
-  }
-
-  Future<double?> _promptQuantity({
-    required String symbol,
-    required String side,
-  }) {
-    final controller = TextEditingController(text: '1');
-    final label = side == 'buy' ? 'Buy' : 'Sell';
-    return showDialog<double>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text('$label $symbol'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'Quantity'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final qty = double.tryParse(controller.text);
-              Navigator.pop(dialogContext, (qty != null && qty > 0) ? qty : null);
-            },
-            child: Text(label),
-          ),
-        ],
-      ),
+  void _trade(Map<String, dynamic> asset, String side) {
+    showBuySellSheet(
+      context,
+      ticker: asset['symbol'] as String,
+      assetType: asset['asset_type'] as String? ?? 'stock',
+      side: side,
     );
   }
 
