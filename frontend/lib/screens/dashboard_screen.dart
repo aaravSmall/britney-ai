@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -35,6 +36,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int? _selectedPortfolioId;
   bool _started = false;
   PortfolioBus? _portfolioBus;
+
+  // Inline stock search, opened from the AppBar's search icon in place of
+  // a navigation to a separate screen — see _buildAppBarTitle/_buildSearchDropdown.
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  bool _searchOpen = false;
+  bool _searchLoading = false;
+  String? _searchError;
+  List<Map<String, dynamic>> _searchResults = [];
 
   int? get _myPortfolioId {
     for (final p in _portfolios) {
@@ -77,7 +87,79 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void dispose() {
     _portfolioBus?.removeListener(_onPortfolioTraded);
+    _searchDebounce?.cancel();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  void _openSearch() {
+    setState(() => _searchOpen = true);
+  }
+
+  void _closeSearch() {
+    _searchDebounce?.cancel();
+    setState(() {
+      _searchOpen = false;
+      _searchController.clear();
+      _searchResults = [];
+      _searchLoading = false;
+      _searchError = null;
+    });
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    final query = value.trim();
+    if (query.isEmpty) {
+      setState(() {
+        _searchResults = [];
+        _searchLoading = false;
+        _searchError = null;
+      });
+      return;
+    }
+    // Flip the spinner on immediately (typing is the signal something's
+    // about to happen) even though the request itself is debounced.
+    setState(() {
+      _searchLoading = true;
+      _searchError = null;
+    });
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () => _runSearch(query));
+  }
+
+  Future<void> _runSearch(String query) async {
+    final api = context.read<ApiService>();
+    try {
+      final res = await api.get('/stocks/search?q=${Uri.encodeQueryComponent(query)}');
+      if (!mounted) return;
+      // A response for an older, already-superseded query could in
+      // principle land after a newer one — only trust it if it still
+      // matches what's in the field right now.
+      if (_searchController.text.trim() != query) return;
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        setState(() {
+          _searchResults = list.map((e) => e as Map<String, dynamic>).toList();
+          _searchLoading = false;
+        });
+      } else {
+        setState(() {
+          _searchError = 'Search failed (${res.statusCode}).';
+          _searchLoading = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted || _searchController.text.trim() != query) return;
+      setState(() {
+        _searchError = 'Network error: $e';
+        _searchLoading = false;
+      });
+    }
+  }
+
+  void _selectSearchResult(String ticker) {
+    _closeSearch();
+    context.push('/stock/$ticker');
   }
 
   /// Fetches the switcher's portfolio list, picks a default selection (the
@@ -252,19 +334,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ],
     );
 
-    // The one entry point into stock search (step 5) — a dedicated
-    // screen/route, not a persistent search bar, since no shared AppBar
-    // exists across the bottom-nav tabs (_MainShell's own Scaffold has no
-    // appBar at all; every tab, including this one, builds its own).
-    // Placed on this tab specifically because it's where the user lands
-    // after login (app_router.dart's redirect defaults to /home).
+    // The one entry point into stock search — an inline bar that slides
+    // out in place of the search icon (not a navigation to a separate
+    // screen), since no shared AppBar exists across the bottom-nav tabs
+    // (_MainShell's own Scaffold has no appBar at all; every tab,
+    // including this one, builds its own). Placed on this tab
+    // specifically because it's where the user lands after login
+    // (app_router.dart's redirect defaults to /home).
     final appBar = AppBar(
-      title: titleWidget,
+      title: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        switchInCurve: Curves.easeOut,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, animation) => FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0.25, 0),
+              end: Offset.zero,
+            ).animate(animation),
+            child: child,
+          ),
+        ),
+        child: _searchOpen
+            ? _buildSearchField(key: const ValueKey('search'))
+            : KeyedSubtree(key: const ValueKey('title'), child: titleWidget),
+      ),
       actions: [
         IconButton(
-          tooltip: 'Search stocks',
-          onPressed: () => context.push('/search'),
-          icon: const Icon(Icons.search_rounded),
+          tooltip: _searchOpen ? 'Close search' : 'Search stocks',
+          onPressed: _searchOpen ? _closeSearch : _openSearch,
+          icon: Icon(_searchOpen ? Icons.close_rounded : Icons.search_rounded),
         ),
       ],
     );
@@ -273,7 +373,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return Scaffold(
         backgroundColor: Colors.transparent,
         appBar: appBar,
-        body: const Center(child: CircularProgressIndicator(color: AppTheme.accent)),
+        body: _withSearchOverlay(
+          const Center(child: CircularProgressIndicator(color: AppTheme.accent)),
+        ),
       );
     }
 
@@ -281,29 +383,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return Scaffold(
         backgroundColor: Colors.transparent,
         appBar: appBar,
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(
-                  Icons.error_outline_rounded,
-                  size: 40,
-                  color: AppTheme.danger,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _error!,
-                  textAlign: TextAlign.center,
-                  style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
-                ),
-                const SizedBox(height: 16),
-                FilledButton(
-                  onPressed: _selectedPortfolioId == null ? _load : _loadPortfolioData,
-                  child: const Text('Try again'),
-                ),
-              ],
+        body: _withSearchOverlay(
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.error_outline_rounded,
+                    size: 40,
+                    color: AppTheme.danger,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _error!,
+                    textAlign: TextAlign.center,
+                    style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton(
+                    onPressed: _selectedPortfolioId == null ? _load : _loadPortfolioData,
+                    child: const Text('Try again'),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -333,7 +437,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       appBar: appBar,
-      body: RefreshIndicator(
+      body: _withSearchOverlay(RefreshIndicator(
         color: AppTheme.accent,
         onRefresh: _loadPortfolioData,
         child: ListView(
@@ -528,7 +632,145 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ],
         ),
+      )),
+    );
+  }
+
+  /// The search field shown in place of the AppBar title while
+  /// [_searchOpen] — rounded-rectangle corners (not a pill), matching
+  /// the app's default input styling.
+  Widget _buildSearchField({required Key key}) {
+    return TextField(
+      key: key,
+      controller: _searchController,
+      autofocus: true,
+      onChanged: _onSearchChanged,
+      textInputAction: TextInputAction.search,
+      style: const TextStyle(fontSize: 15),
+      decoration: InputDecoration(
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        prefixIcon: const Icon(Icons.search_rounded, size: 20),
+        hintText: 'Search stocks',
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: AppTheme.accent, width: 1.5),
+        ),
       ),
+    );
+  }
+
+  /// Wraps [body] with the search results dropdown — a scrim + floating
+  /// panel positioned right below the AppBar (i.e. below the search bar)
+  /// when [_searchOpen], rather than a separate screen. Applied to every
+  /// Scaffold body (loading/error/loaded) so search still works while the
+  /// dashboard itself is loading or has failed to load.
+  Widget _withSearchOverlay(Widget body) {
+    if (!_searchOpen) return body;
+    return Stack(
+      children: [
+        body,
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _closeSearch,
+            child: Container(color: Colors.black.withValues(alpha: 0.4)),
+          ),
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: Material(
+            color: Colors.transparent,
+            child: _buildSearchDropdown(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSearchDropdown() {
+    final t = Theme.of(context).textTheme;
+    final query = _searchController.text.trim();
+    if (query.isEmpty) return const SizedBox.shrink();
+
+    Widget content;
+    if (_searchLoading) {
+      content = const Padding(
+        padding: EdgeInsets.all(20),
+        child: Center(
+          heightFactor: 1,
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.accent),
+          ),
+        ),
+      );
+    } else if (_searchError != null) {
+      content = Padding(
+        padding: const EdgeInsets.all(20),
+        child: Text(_searchError!, style: t.bodySmall?.copyWith(color: AppTheme.danger)),
+      );
+    } else if (_searchResults.isEmpty) {
+      content = Padding(
+        padding: const EdgeInsets.all(20),
+        child: Text(
+          'No results',
+          style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+        ),
+      );
+    } else {
+      content = ListView.separated(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        itemCount: _searchResults.length,
+        separatorBuilder: (_, __) => Divider(
+          height: 1,
+          color: AppTheme.borderSubtleOf(context),
+        ),
+        itemBuilder: (context, i) {
+          final r = _searchResults[i];
+          final ticker = r['ticker'] as String;
+          final name = r['name'] as String? ?? '';
+          final exchange = r['exchange'] as String? ?? '';
+          return ListTile(
+            dense: true,
+            title: Text(ticker, style: const TextStyle(fontWeight: FontWeight.w600)),
+            subtitle: Text(
+              exchange.isNotEmpty ? '$name · $exchange' : name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+            ),
+            onTap: () => _selectSearchResult(ticker),
+          );
+        },
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+      constraints: const BoxConstraints(maxHeight: 360),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceOf(context),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.borderSubtleOf(context)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.3),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: content,
     );
   }
 }

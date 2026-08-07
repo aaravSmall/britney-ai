@@ -434,11 +434,9 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
                           ],
                         ),
                       ),
-                    if (quote['description'] != null)
-                      Text(
-                        quote['description'] as String,
-                        style: t.bodyMedium?.copyWith(height: 1.45),
-                      ),
+                    if (quote['description'] != null &&
+                        (quote['description'] as String).trim().isNotEmpty)
+                      _ExpandableAbout(quote['description'] as String),
                   ],
                 ),
               ),
@@ -528,6 +526,66 @@ class _StatRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Company description, truncated to its first ~3 sentences with a "Read
+/// more"/"Read less" toggle — Yahoo/yfinance descriptions are often a
+/// full multi-paragraph bio, and the About card is meant to be a glance,
+/// not a wall of text.
+class _ExpandableAbout extends StatefulWidget {
+  const _ExpandableAbout(this.text);
+
+  final String text;
+
+  @override
+  State<_ExpandableAbout> createState() => _ExpandableAboutState();
+}
+
+class _ExpandableAboutState extends State<_ExpandableAbout> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final full = widget.text.trim();
+    final truncated = _truncateToSentences(full, 3);
+    final canExpand = truncated.length < full.length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          _expanded || !canExpand ? full : truncated,
+          style: t.bodyMedium?.copyWith(height: 1.45),
+        ),
+        if (canExpand)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: GestureDetector(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Text(
+                _expanded ? 'Read less' : 'Read more',
+                style: t.bodyMedium?.copyWith(
+                  color: AppTheme.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// First [maxSentences] sentences of [text] (split on '.'/'!'/'?'
+/// followed by whitespace or end-of-string) — descriptions from this data
+/// source are one long paragraph, not multiple, so a sentence boundary is
+/// what actually shortens them, not a paragraph break. Returns [text]
+/// unchanged if it doesn't have more than [maxSentences] to begin with.
+String _truncateToSentences(String text, int maxSentences) {
+  final sentences = RegExp(r'[^.!?]+[.!?]+(?:\s+|$)').allMatches(text).toList();
+  if (sentences.length <= maxSentences) return text;
+  return text.substring(0, sentences[maxSentences - 1].end).trimRight();
 }
 
 class _InfoChip extends StatelessWidget {
