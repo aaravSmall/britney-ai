@@ -6,38 +6,7 @@ import 'package:provider/provider.dart';
 import '../services/api_service.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
-
-const List<String> _monthAbbr = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
-
-/// Quantity for display: whole numbers as-is, fractional values to up to
-/// 8 decimal places (satoshi-level precision) with trailing zeros trimmed.
-/// A fixed 4-place format would silently round small crypto fills toward
-/// zero — e.g. a 0.00030612 BTC fill would round to "0.0003" or, for a
-/// smaller fill still, all the way to "0.0000" despite being a real,
-/// paid-for position.
-String _formatQuantity(double qty) {
-  if (qty == qty.roundToDouble()) return qty.toStringAsFixed(0);
-  var s = qty.toStringAsFixed(8);
-  s = s.replaceFirst(RegExp(r'0+$'), '');
-  if (s.endsWith('.')) s += '0';
-  return s;
-}
-
-String _formatTradeTime(DateTime d, bool use24Hour) {
-  final minute = d.minute.toString().padLeft(2, '0');
-  final String time;
-  if (use24Hour) {
-    time = '${d.hour}:$minute';
-  } else {
-    final hour12 = d.hour % 12 == 0 ? 12 : d.hour % 12;
-    final suffix = d.hour < 12 ? 'AM' : 'PM';
-    time = '$hour12:$minute $suffix';
-  }
-  return '${_monthAbbr[d.month - 1]} ${d.day} · $time';
-}
+import '../utils/format.dart';
 
 /// One page of trade history: limit/offset pagination via
 /// GET /portfolios/{id}/trades, matching the endpoint built in Sprint 1.
@@ -335,7 +304,7 @@ class _TradeTile extends StatelessWidget {
 
     final buy = side == 'buy';
     final sideColor = buy ? AppTheme.accent : AppTheme.danger;
-    final qtyLabel = _formatQuantity(quantity);
+    final qtyLabel = formatQuantity(quantity);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
@@ -357,7 +326,7 @@ class _TradeTile extends StatelessWidget {
           ],
         ),
         subtitle: Text(
-          '$qtyLabel $assetType @ \$${price.toStringAsFixed(2)} · ${_formatTradeTime(timestamp, use24Hour)}',
+          '$qtyLabel $assetType @ \$${price.toStringAsFixed(2)} · ${formatTradeTime(timestamp, use24Hour)}',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Column(

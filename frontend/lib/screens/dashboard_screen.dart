@@ -615,7 +615,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ],
             ),
             const SizedBox(height: 10),
-            ...holdings.map((h) => _HoldingTile(h)),
+            ...holdings.map(
+              (h) => _HoldingTile(h, portfolioId: dashboard['portfolio_id'] as int),
+            ),
             const SizedBox(height: 20),
             Card(
               child: ListTile(
@@ -1006,13 +1008,15 @@ class _SummaryCardState extends State<_SummaryCard> {
 }
 
 class _HoldingTile extends StatelessWidget {
-  const _HoldingTile(this.h);
+  const _HoldingTile(this.h, {required this.portfolioId});
 
   final Map<String, dynamic> h;
+  final int portfolioId;
 
   @override
   Widget build(BuildContext context) {
     final sym = h['symbol'] as String;
+    final assetType = h['asset_type'] as String;
     final qty = (h['quantity'] as num).toDouble();
     final mv = h['market_value'];
     final t = Theme.of(context).textTheme;
@@ -1034,13 +1038,14 @@ class _HoldingTile extends StatelessWidget {
         ),
         title: Text(sym, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text(
-          '${formatQuantity(qty)} ${h['asset_type']}',
+          '${formatQuantity(qty)} $assetType',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Text(
           mv != null ? '\$${(mv as num).toStringAsFixed(2)}' : '—',
           style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
         ),
+        onTap: () => context.push('/stock/$sym?assetType=$assetType&portfolioId=$portfolioId'),
       ),
     );
   }

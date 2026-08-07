@@ -11,3 +11,23 @@ String formatQuantity(double qty) {
   if (s.endsWith('.')) s += '0';
   return s;
 }
+
+const List<String> _monthAbbr = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// "Aug 7 · 2:30 PM" (or "14:30" in 24-hour mode) — the app's shared
+/// trade-timestamp format, used anywhere a fill's local time is shown.
+String formatTradeTime(DateTime d, bool use24Hour) {
+  final minute = d.minute.toString().padLeft(2, '0');
+  final String time;
+  if (use24Hour) {
+    time = '${d.hour}:$minute';
+  } else {
+    final hour12 = d.hour % 12 == 0 ? 12 : d.hour % 12;
+    final suffix = d.hour < 12 ? 'AM' : 'PM';
+    time = '$hour12:$minute $suffix';
+  }
+  return '${_monthAbbr[d.month - 1]} ${d.day} · $time';
+}

@@ -47,13 +47,22 @@ GoRouter createRouter(AuthController auth) {
       ),
       GoRoute(
         // Standalone by design (see stock_detail_screen.dart) — search
-        // results, the favorites list, and any future entry point all
-        // push this same route with just a ticker, same as
-        // /trade-history/:portfolioId above.
+        // results, the favorites list, a holding tile, and any future
+        // entry point all push this same route with just a ticker, same
+        // as /trade-history/:portfolioId above. `assetType`/`portfolioId`
+        // are optional query params (not `extra`, so a page refresh/deep
+        // link still works) set only when navigating from a known
+        // holding — see dashboard_screen.dart's _HoldingTile.
         path: '/stock/:ticker',
         builder: (_, state) {
           final ticker = state.pathParameters['ticker'] ?? '';
-          return StockDetailScreen(ticker: ticker);
+          final assetType = state.uri.queryParameters['assetType'] ?? 'stock';
+          final portfolioId = int.tryParse(state.uri.queryParameters['portfolioId'] ?? '');
+          return StockDetailScreen(
+            ticker: ticker,
+            assetType: assetType,
+            portfolioId: portfolioId,
+          );
         },
       ),
       // StatefulShellRoute.indexedStack keeps each tab's widget tree (and

@@ -47,3 +47,25 @@ class SnapshotPointOut(BaseModel):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.isoformat()
+
+
+class HoldingPricePointOut(BaseModel):
+    """One symbol's price/quantity/value at a single PortfolioSnapshot
+    timestamp, as returned by GET /dashboard/performance/{symbol} and
+    GET /portfolios/{id}/performance/{symbol} — the same PortfolioSnapshot
+    rows behind SnapshotPointOut/the portfolio-level chart, just reading
+    one entry out of each row's per-holding `holdings` breakdown instead
+    of the aggregate total_value. Built from a plain dict (see
+    portfolio_snapshot_service.get_symbol_price_history), not an ORM row,
+    so no from_attributes config here."""
+
+    timestamp: datetime
+    price: float
+    quantity: float
+    value: float
+
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, dt: datetime) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()

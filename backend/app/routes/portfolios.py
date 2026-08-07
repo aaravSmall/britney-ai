@@ -9,10 +9,15 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from agent.decision_loop import ensure_target_portfolios
 from app.deps import DbSession, OptionalCurrentUser, resolve_current_user
 from app.models import Portfolio, PortfolioSnapshot, Trade
-from app.schemas.dashboard import DashboardResponse, PortfolioListItem, SnapshotPointOut
+from app.schemas.dashboard import (
+    DashboardResponse,
+    HoldingPricePointOut,
+    PortfolioListItem,
+    SnapshotPointOut,
+)
 from app.schemas.trading import TradeOut
 from app.services.portfolio_service import build_portfolio_summary, get_or_create_portfolio
-from app.services.portfolio_snapshot_service import get_snapshots
+from app.services.portfolio_snapshot_service import get_snapshots, get_symbol_price_history
 
 router = APIRouter(prefix="/portfolios", tags=["portfolios"])
 
@@ -144,10 +149,59 @@ def get_portfolio_performance(
     return get_snapshots(db, portfolio.id, start=effective_since, end=until)
 
 
+@router.get("/{portfolio_id}/performance/{symbol}", response_model=list[HoldingPricePointOut])
+def get_portfolio_holding_performance(
+    portfolio_id: int,
+    symbol: str,
+    db: DbSession,
+    range_: str | None = Query(
+        None,
+        alias="range",
+        pattern="^(today|week|month30|ytd|fiveYear)$",
+        description=(
+            "Shorthand matching the chart's range toggles "
+            "(today/week/month30/ytd/fiveYear); translated into a `since` "
+            "cutoff. Ignored if `since` is given."
+        ),
+    ),
+    since: datetime | None = Query(
+        None, description="Only snapshots at/after this ISO timestamp."
+    ),
+    until: datetime | None = Query(
+        None, description="Only snapshots at/before this ISO timestamp."
+    ),
+    authorization: Annotated[str | None, Header()] = None,
+) -> list[dict]:
+    """Same shape and semantics as GET /dashboard/performance/{symbol}, for
+    any portfolio_id rather than just the caller's own — feeds the
+    holding-detail chart when the ticker was reached from an agent
+    portfolio's holdings list. Agent portfolios are publicly readable; a
+    user portfolio requires the owning user's token."""
+    portfolio = db.get(Portfolio, portfolio_id)
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    _require_owner_if_user_portfolio(db, portfolio, authorization)
+
+    effective_since = since
+    if effective_since is None and range_:
+        now = datetime.utcnow()
+        if range_ == "today":
+            effective_since = datetime(now.year, now.month, now.day)
+        elif range_ == "ytd":
+            effective_since = datetime(now.year, 1, 1)
+        else:
+            effective_since = now - _RANGE_WINDOWS[range_]
+
+    return get_symbol_price_history(db, portfolio.id, symbol, start=effective_since, end=until)
+
+
 @router.get("/{portfolio_id}/trades", response_model=list[TradeOut])
 def get_trade_history(
     portfolio_id: int,
     db: DbSession,
+    symbol: str | None = Query(
+        None, description="Filter to a single ticker (case-insensitive)."
+    ),
     source: str | None = Query(
         None,
         pattern="^(user|agent)$",
@@ -173,6 +227,8 @@ def get_trade_history(
     _require_owner_if_user_portfolio(db, portfolio, authorization)
 
     query = db.query(Trade).filter(Trade.portfolio_id == portfolio_id)
+    if symbol:
+        query = query.filter(Trade.symbol == symbol.upper())
     if source:
         query = query.filter(Trade.source == source)
     if since:

@@ -8,18 +8,39 @@ import '../data/chart_range.dart';
 import '../services/api_service.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
+import '../utils/format.dart';
 import '../widgets/buy_sell_bottom_sheet.dart';
 import '../widgets/price_chart.dart';
 
-/// Standalone stock detail page — takes only a [ticker], so it works
+/// Standalone stock/crypto detail page — takes a [ticker], so it works
 /// identically regardless of how the caller got here (search results,
 /// favorites list, a deep link, ...). Pushed as a top-level route
 /// (/stock/:ticker in app_router.dart), same as trade_history_screen.dart,
 /// not nested inside the bottom-nav shell.
+///
+/// [assetType] and [portfolioId] are optional query params, set only when
+/// navigating from a known holding (dashboard_screen.dart's _HoldingTile):
+/// [assetType] picks the price/quote data source (Yahoo for 'stock' —
+/// this app has no public crypto quote/history endpoint, so 'crypto'
+/// skips that section entirely and relies on the position chart below
+/// instead), and [portfolioId] (plus a resolved-if-absent "my portfolio"
+/// fallback) is who GET /portfolios/{id}/summary is asked whether this
+/// ticker is a current holding — if so, a "Your position" section shows
+/// cost basis, unrealized P&L, a per-holding price chart (reusing the
+/// exact PortfolioSnapshot data source behind the portfolio-level chart,
+/// scoped to this symbol — see portfolio_snapshot_service.py), and recent
+/// trades for this ticker.
 class StockDetailScreen extends StatefulWidget {
-  const StockDetailScreen({super.key, required this.ticker});
+  const StockDetailScreen({
+    super.key,
+    required this.ticker,
+    this.assetType = 'stock',
+    this.portfolioId,
+  });
 
   final String ticker;
+  final String assetType;
+  final int? portfolioId;
 
   @override
   State<StockDetailScreen> createState() => _StockDetailScreenState();
@@ -43,16 +64,144 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
   bool? _isFavorite;
   bool _favoriteBusy = false;
 
+  // The current holding matching this ticker (any asset type), resolved
+  // from widget.portfolioId or, if absent, the user's own portfolio —
+  // null once resolved means "not currently held", not "still loading"
+  // (see _positionLoading for that). Powers the "Your position" section
+  // for both stocks and crypto.
+  bool _positionLoading = true;
+  Map<String, dynamic>? _position;
+  int? _positionPortfolioId;
+  bool _positionChartLoading = false;
+  List<Map<String, dynamic>> _positionCandles = [];
+  bool _recentTradesLoading = false;
+  List<Map<String, dynamic>> _recentTrades = [];
+
+  bool get _isCrypto => widget.assetType == 'crypto';
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (_started) return;
     _started = true;
-    _loadQuoteAndFavoriteState();
-    _loadHistory(_range);
+    _loadPosition();
+    if (!_isCrypto) {
+      _loadQuoteAndFavoriteState();
+      _loadHistory(_range);
+    }
   }
 
   String get _ticker => widget.ticker.toUpperCase();
+
+  /// Resolves which portfolio to check for a current holding (the given
+  /// [widget.portfolioId], or the user's own if absent), then fetches
+  /// that portfolio's holdings and looks for one matching this ticker.
+  /// GET /portfolios/{id}/summary works identically for the caller's own
+  /// portfolio as for any other (same auth rules as /dashboard), so this
+  /// never needs to special-case "mine" vs. "an agent's" beyond picking
+  /// the id.
+  Future<void> _loadPosition() async {
+    final api = context.read<ApiService>();
+    setState(() => _positionLoading = true);
+    try {
+      var pid = widget.portfolioId;
+      if (pid == null) {
+        final portfoliosRes = await api.get('/portfolios');
+        if (!mounted) return;
+        if (portfoliosRes.statusCode == 200) {
+          final list = (jsonDecode(portfoliosRes.body) as List<dynamic>)
+              .map((e) => e as Map<String, dynamic>)
+              .toList();
+          for (final p in list) {
+            if (p['owner_type'] == 'user') {
+              pid = p['id'] as int;
+              break;
+            }
+          }
+        }
+      }
+      if (pid == null) {
+        if (mounted) setState(() { _position = null; _positionLoading = false; });
+        return;
+      }
+
+      final res = await api.get('/portfolios/$pid/summary');
+      if (!mounted) return;
+      if (res.statusCode != 200) {
+        setState(() { _position = null; _positionLoading = false; });
+        return;
+      }
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final holdings = (body['holdings'] as List<dynamic>)
+          .map((e) => e as Map<String, dynamic>)
+          .toList();
+      Map<String, dynamic>? match;
+      for (final h in holdings) {
+        if ((h['symbol'] as String).toUpperCase() == _ticker) {
+          match = h;
+          break;
+        }
+      }
+
+      setState(() {
+        _position = match;
+        _positionPortfolioId = pid;
+        _positionLoading = false;
+      });
+      if (match != null) {
+        _loadRecentTrades(pid);
+        if (_isCrypto) _loadPositionChart(pid);
+      }
+    } catch (_) {
+      if (mounted) setState(() { _position = null; _positionLoading = false; });
+    }
+  }
+
+  Future<void> _loadPositionChart(int portfolioId) async {
+    final api = context.read<ApiService>();
+    setState(() => _positionChartLoading = true);
+    try {
+      // .name (not .shortLabel) — the performance endpoints' `range`
+      // param matches ChartRange's own enum names (today/week/month30/
+      // ytd/fiveYear), unlike /stocks/{ticker}/history's Yahoo-flavored
+      // shortLabel vocabulary (1D/1W/30D/YTD/5Y).
+      final res = await api.get(
+        '/portfolios/$portfolioId/performance/$_ticker?range=${_range.name}',
+      );
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        setState(() {
+          _positionCandles = list.map((e) => e as Map<String, dynamic>).toList();
+          _positionChartLoading = false;
+        });
+      } else {
+        setState(() { _positionCandles = []; _positionChartLoading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _positionCandles = []; _positionChartLoading = false; });
+    }
+  }
+
+  Future<void> _loadRecentTrades(int portfolioId) async {
+    final api = context.read<ApiService>();
+    setState(() => _recentTradesLoading = true);
+    try {
+      final res = await api.get('/portfolios/$portfolioId/trades?symbol=$_ticker&limit=5');
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        setState(() {
+          _recentTrades = list.map((e) => e as Map<String, dynamic>).toList();
+          _recentTradesLoading = false;
+        });
+      } else {
+        setState(() { _recentTrades = []; _recentTradesLoading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _recentTrades = []; _recentTradesLoading = false; });
+    }
+  }
 
   /// Fetches the quote and the user's favorites list in parallel. The
   /// favorites list is also how the initial heart state is determined
@@ -160,6 +309,15 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
     _loadHistory(range);
   }
 
+  /// Crypto's range toggle drives the position chart instead of
+  /// _loadHistory (there's no Yahoo history for crypto to fetch).
+  void _onPositionRangeSelected(ChartRange range) {
+    if (range == _range) return;
+    setState(() => _range = range);
+    final pid = _positionPortfolioId;
+    if (pid != null) _loadPositionChart(pid);
+  }
+
   Future<void> _toggleFavorite() async {
     if (_favoriteBusy) return;
     final wasFavorite = _isFavorite ?? false;
@@ -207,6 +365,12 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
+
+    // Crypto has no Yahoo quote/history/favorite in this app (see the
+    // class doc comment) — a separate, simpler scaffold built entirely
+    // from portfolio-holding data rather than threading `_isCrypto`
+    // through every branch of the stock scaffold below.
+    if (_isCrypto) return _buildCryptoScaffold(t);
 
     // Same reasoning as trade_history_screen.dart: this is a top-level
     // route outside StatefulShellRoute's _MainShell (the only widget that
@@ -302,7 +466,7 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
                   onPressed: () => showBuySellSheet(
                     context,
                     ticker: _ticker,
-                    assetType: 'stock',
+                    assetType: widget.assetType,
                     side: 'sell',
                   ),
                   child: const Text('Sell'),
@@ -314,7 +478,7 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
                   onPressed: () => showBuySellSheet(
                     context,
                     ticker: _ticker,
-                    assetType: 'stock',
+                    assetType: widget.assetType,
                     side: 'buy',
                   ),
                   child: const Text('Buy'),
@@ -322,6 +486,15 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
               ),
             ],
           ),
+          if (_position != null) ...[
+            const SizedBox(height: 24),
+            _PositionCard(
+              position: _position!,
+              assetType: widget.assetType,
+              recentTrades: _recentTrades,
+              recentTradesLoading: _recentTradesLoading,
+            ),
+          ],
           const SizedBox(height: 24),
           Row(
             children: [
@@ -446,6 +619,152 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
       ),
     );
   }
+
+  /// Crypto has no Yahoo quote/history in this app (stock_data.py is
+  /// stock-only), so this branch is built entirely from the resolved
+  /// holding: current price is the holding's own last_price, and the
+  /// price chart reads the same PortfolioSnapshot-backed per-symbol
+  /// series as the "Your position" section on the stock branch above,
+  /// just promoted to the page's primary chart since there's no Yahoo
+  /// chart to show alongside it.
+  Widget _buildCryptoScaffold(TextTheme t) {
+    final use24Hour = context.watch<TimeFormatController>().use24Hour;
+    final position = _position;
+    final lastPrice = (position?['last_price'] as num?)?.toDouble();
+    final isIntraday = _range == ChartRange.today;
+
+    final values = [for (final c in _positionCandles) (c['price'] as num).toDouble()];
+    final times = [
+      for (final c in _positionCandles) DateTime.parse(c['timestamp'] as String).toLocal(),
+    ];
+
+    return Scaffold(
+      appBar: AppBar(title: Text(_ticker)),
+      body: _positionLoading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.accent))
+          : RefreshIndicator(
+              color: AppTheme.accent,
+              onRefresh: _loadPosition,
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
+                children: [
+                  Text(_ticker, style: t.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 10),
+                  Text(
+                    lastPrice != null ? '\$${lastPrice.toStringAsFixed(2)}' : '—',
+                    style:
+                        t.headlineMedium?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.5),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => showBuySellSheet(
+                            context,
+                            ticker: _ticker,
+                            assetType: 'crypto',
+                            side: 'sell',
+                          ),
+                          child: const Text('Sell'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => showBuySellSheet(
+                            context,
+                            ticker: _ticker,
+                            assetType: 'crypto',
+                            side: 'buy',
+                          ),
+                          child: const Text('Buy'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (position != null) ...[
+                    const SizedBox(height: 24),
+                    _PositionCard(
+                      position: position,
+                      assetType: 'crypto',
+                      recentTrades: _recentTrades,
+                      recentTradesLoading: _recentTradesLoading,
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      children: [
+                        Text(
+                          'Price history',
+                          style:
+                              t.titleSmall?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 0.2),
+                        ),
+                        const Spacer(),
+                        ChartKindToggle(
+                          value: _chartKind,
+                          onChanged: (k) => setState(() => _chartKind = k),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final r in ChartRange.values)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                showCheckmark: false,
+                                selectedColor: AppTheme.accent.withValues(alpha: 0.22),
+                                label: Text(r.shortLabel),
+                                selected: _range == r,
+                                onSelected: (_) => _onPositionRangeSelected(r),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: _positionChartLoading
+                            ? const SizedBox(
+                                height: 180,
+                                child: Center(
+                                  child: CircularProgressIndicator(color: AppTheme.accent),
+                                ),
+                              )
+                            : PriceChartView(
+                                values: values,
+                                times: times,
+                                chartKind: _chartKind,
+                                isIntraday: isIntraday,
+                                use24Hour: use24Hour,
+                                hasAnyHistory: _positionCandles.isNotEmpty,
+                                noHistoryMessage: 'No price history captured yet for $_ticker.',
+                                noDataInRangeMessage: 'No data in this range — try a wider range.',
+                                notEnoughPointsMessage: 'Not enough data yet to chart this range.',
+                              ),
+                      ),
+                    ),
+                  ] else
+                    Padding(
+                      padding: const EdgeInsets.only(top: 40),
+                      child: Center(
+                        child: Text(
+                          "You don't currently hold $_ticker.",
+                          style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
 }
 
 String _errorDetail(String body) {
@@ -498,11 +817,12 @@ String _formatCompactCurrency(dynamic v) {
 }
 
 class _StatRow extends StatelessWidget {
-  const _StatRow(this.label, this.value, {this.isLast = false});
+  const _StatRow(this.label, this.value, {this.isLast = false, this.valueColor});
 
   final String label;
   final String value;
   final bool isLast;
+  final Color? valueColor;
 
   @override
   Widget build(BuildContext context) {
@@ -521,7 +841,195 @@ class _StatRow extends StatelessWidget {
             style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
           ),
           const Spacer(),
-          Text(value, style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+          Text(
+            value,
+            style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600, color: valueColor),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Cost basis, market value, and unrealized P&L for a current holding —
+/// avg_cost/quantity/last_price/market_value already come straight from
+/// GET /portfolios/{id}/summary's HoldingOut (avg_cost is itself a
+/// running weighted-average maintained per fill in
+/// portfolio_service.record_trade_fill, i.e. already "computed from
+/// trade history"; recomputing it independently here would just be the
+/// same arithmetic against the same rows, so this reuses the stored
+/// value instead of re-deriving it from raw Trade rows). Shown for both
+/// stocks and crypto — see StockDetailScreen's class doc comment.
+class _PositionCard extends StatelessWidget {
+  const _PositionCard({
+    required this.position,
+    required this.assetType,
+    required this.recentTrades,
+    required this.recentTradesLoading,
+  });
+
+  final Map<String, dynamic> position;
+  final String assetType;
+  final List<Map<String, dynamic>> recentTrades;
+  final bool recentTradesLoading;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final use24Hour = context.watch<TimeFormatController>().use24Hour;
+
+    final qty = (position['quantity'] as num).toDouble();
+    final avgCost = (position['avg_cost'] as num).toDouble();
+    final lastPrice = (position['last_price'] as num?)?.toDouble();
+    final marketValue = (position['market_value'] as num?)?.toDouble() ??
+        (lastPrice != null ? qty * lastPrice : null);
+    final costBasis = avgCost * qty;
+    final pnlRaw = marketValue != null ? marketValue - costBasis : null;
+    final pnlPctRaw = (pnlRaw != null && costBasis != 0) ? pnlRaw / costBasis * 100 : null;
+    // Rounded to cents/hundredths, with -0.0 normalized to 0.0 — floating-
+    // point noise in market_value (e.g. 1566.6499999999999 vs. an exact
+    // 1566.65 cost basis) otherwise renders an at-cost position as
+    // "$-0.00 (-0.00%)" in red instead of a flat $0.00.
+    final pnl = _roundNonNegativeZero(pnlRaw);
+    final pnlPct = _roundNonNegativeZero(pnlPctRaw);
+    final pnlPositive = (pnl ?? 0) >= 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Your position',
+          style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 0.2),
+        ),
+        const SizedBox(height: 10),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              children: [
+                _StatRow('Quantity', '${formatQuantity(qty)} $assetType'),
+                _StatRow('Avg. cost', '\$${avgCost.toStringAsFixed(2)} / unit'),
+                _StatRow('Cost basis', '\$${costBasis.toStringAsFixed(2)}'),
+                _StatRow(
+                  'Market value',
+                  marketValue != null ? '\$${marketValue.toStringAsFixed(2)}' : '—',
+                ),
+                _StatRow(
+                  'Unrealized P&L',
+                  pnl != null && pnlPct != null
+                      ? '${pnlPositive ? '+' : ''}\$${pnl.toStringAsFixed(2)} '
+                          '(${pnlPositive ? '+' : ''}${pnlPct.toStringAsFixed(2)}%)'
+                      : '—',
+                  isLast: true,
+                  valueColor: pnl != null ? (pnlPositive ? AppTheme.accent : AppTheme.danger) : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Recent trades',
+          style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600, letterSpacing: 0.2),
+        ),
+        const SizedBox(height: 10),
+        if (recentTradesLoading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(color: AppTheme.accent, strokeWidth: 2),
+              ),
+            ),
+          )
+        else if (recentTrades.isEmpty)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'No trades yet for this ticker.',
+                style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+              ),
+            ),
+          )
+        else
+          Card(
+            child: Column(
+              children: [
+                for (var i = 0; i < recentTrades.length; i++)
+                  _RecentTradeRow(
+                    recentTrades[i],
+                    use24Hour: use24Hour,
+                    isLast: i == recentTrades.length - 1,
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _RecentTradeRow extends StatelessWidget {
+  const _RecentTradeRow(this.trade, {required this.use24Hour, required this.isLast});
+
+  final Map<String, dynamic> trade;
+  final bool use24Hour;
+  final bool isLast;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final side = trade['side'] as String;
+    final buy = side == 'buy';
+    final sideColor = buy ? AppTheme.accent : AppTheme.danger;
+    final qty = (trade['quantity'] as num).toDouble();
+    final price = (trade['price'] as num).toDouble();
+    final source = trade['source'] as String;
+    final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: isLast
+          ? null
+          : BoxDecoration(
+              border: Border(bottom: BorderSide(color: AppTheme.borderSubtleOf(context))),
+            ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: sideColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              side.toUpperCase(),
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: sideColor),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${formatQuantity(qty)} @ \$${price.toStringAsFixed(2)}',
+                  style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  '${formatTradeTime(timestamp, use24Hour)} · ${source == 'agent' ? 'Agent' : 'You'}',
+                  style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '\$${(qty * price).toStringAsFixed(2)}',
+            style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );
@@ -586,6 +1094,17 @@ String _truncateToSentences(String text, int maxSentences) {
   final sentences = RegExp(r'[^.!?]+[.!?]+(?:\s+|$)').allMatches(text).toList();
   if (sentences.length <= maxSentences) return text;
   return text.substring(0, sentences[maxSentences - 1].end).trimRight();
+}
+
+/// Rounds to 2 decimal places and normalizes -0.0 to 0.0 — without this,
+/// a value like -1.1e-13 (floating-point noise from a market_value vs.
+/// cost_basis subtraction that should net to exactly zero) still prints
+/// as "-0.00" via toStringAsFixed, since Dart's formatting preserves the
+/// sign bit even on a value that rounds to zero.
+double? _roundNonNegativeZero(double? v) {
+  if (v == null) return null;
+  final rounded = double.parse(v.toStringAsFixed(2));
+  return rounded == 0 ? 0.0 : rounded;
 }
 
 class _InfoChip extends StatelessWidget {
