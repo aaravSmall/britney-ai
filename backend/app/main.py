@@ -13,6 +13,7 @@ from app.database import Base, engine
 from app.routes import (
     chat,
     dashboard,
+    favorites,
     health,
     onboarding,
     portfolios,
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(trading.router)
     app.include_router(settings_routes.router)
     app.include_router(stocks.router)
+    app.include_router(favorites.router)
     return app
 
 
