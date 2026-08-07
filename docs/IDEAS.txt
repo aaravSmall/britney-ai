@@ -48,47 +48,36 @@ FRONTEND / UX
 - Mobile builds (android/ios folders aren't generated yet — currently
   flutter web only in practice).
 
-AGENT — CRYPTO NEWS (plan only, not implemented; flagged 2026-08-04)
-- Gap: backend/agent/news_ingestion.py only fetches stock/ETF news via
-  Finnhub's free /company-news endpoint, which doesn't cover crypto —
-  BTC/ETH/SOL are listed in TARGET_PORTFOLIOS but silently skipped. The
-  agent isn't feature-complete until it has a crypto news source too.
-- Source options (free-tier-first, roughly in order of how much cleanup
-  they'd need before feeding the sentiment/decision loop):
-  - CryptoPanic free tier — purpose-built crypto news aggregator, already
-    tags posts with currency codes (closest analog to Finnhub's `related`
-    field), but the free API has gotten stingier over time (auth token
-    required, low request quota) — needs checking at implementation time.
-  - CoinDesk / CoinTelegraph (or similar) RSS feeds — free, no key, no
-    rate limit beyond "don't hammer it," but no ticker tagging at all:
-    would need keyword/symbol matching against headline+body to attribute
-    an article to BTC/ETH/SOL, and no stable article id (would hash the
-    URL, same trick as any id-less source).
-  - Reddit (e.g. r/CryptoCurrency, r/Bitcoin) via the public `.json`
-    endpoints — free, no auth for read-only, but noisier signal per-post
-    than news articles; probably wants aggregation across many posts
-    rather than per-post scoring, and needs a custom User-Agent header or
-    Reddit rate-limits/blocks the requests.
-  - CryptoCompare News API — another free-tier aggregator option, similar
-    tradeoffs to CryptoPanic, worth a quick comparison before picking one.
-- Interface: whichever source(s) get picked should normalize into the
-  exact same NewsArticle shape news_ingestion.py already produces
-  ({ticker, headline, summary, source, url, published_at, article_id}),
-  either via a new fetch_crypto_news() alongside fetch_news() or by
-  extending fetch_news() to branch on asset_type internally. Either way
-  the goal is that agent/sentiment.py and the future decision-loop module
-  don't need to know or care which provider a given article came from.
-- Gotchas:
-  - Crypto trades 24/7 — no market-hours gating like stocks implicitly
-    get. Whatever polling/scheduling cadence the agent ends up using for
-    stock news shouldn't just be reused verbatim for crypto; crypto news
-    can matter just as much at 3am as 3pm.
-  - Ticker attribution from free-text sources (RSS/Reddit) is fuzzy —
-    keyword matching risks both false positives (e.g. "ETH Zurich") and
-    false negatives (nicknames, tickers not mentioned verbatim).
-  - Rate limits and ToS vary a lot across these free options and are
-    worth re-checking right before implementation, not just at planning
-    time — free tiers change terms/quotas without much notice.
+AGENT — CRYPTO NEWS
+- INGESTION DONE (2026-08-07): backend/agent/news_ingestion.py now has
+  fetch_crypto_news() (CryptoPanic free tier), symmetric to the existing
+  fetch_news() (Finnhub) — same NewsArticle shape, same SeenArticleStore
+  dedupe discipline, same RateLimiter, same real-vs-mock loud logging.
+  target_crypto_tickers()/target_crypto_tickers_for(tier) mirror the
+  stock equivalents. Verified: mock-mode fallback (no CRYPTOPANIC_API_KEY)
+  produces correctly-labeled placeholder articles for BTC/ETH/SOL, and
+  its output flows through agent/sentiment.py's score_batch() completely
+  unmodified. Real-API verification against CryptoPanic itself (a live
+  key, actual BTC/ETH articles) was NOT done — no key was available at
+  implementation time; do that before relying on this in production.
+- STILL NOT WIRED IN: agent/decision_loop.py's run_once() only calls
+  news_ingestion.target_stock_tickers_for(tier) + fetch_news() — it never
+  calls target_crypto_tickers_for()/fetch_crypto_news(), so crypto
+  tickers still get zero trading decisions today (not "some fallback
+  signal" — they're just absent from the loop's ticker list entirely).
+  Wiring this in needs decision_loop.py changes beyond ingestion:
+  - run_once() needs to also fetch+merge crypto articles for the tier.
+  - _execute() hardcodes asset_type="stock" for both pricing
+    (market_data.get_price_for_holding) and execute_trade() — needs an
+    asset_type param threaded through instead, sourced from
+    TARGET_PORTFOLIOS rather than assumed.
+  - Crypto trades 24/7 with no market-hours gating like stocks implicitly
+    get (see run_agent.py's scheduler) — the same poll cadence shouldn't
+    just be reused verbatim; crypto news can matter as much at 3am as 3pm.
+  Deliberately left undone for now — see the commit that added
+  fetch_crypto_news() for why (kept ingestion and decision-loop wiring as
+  separate changes rather than touching decision_loop.py's live trading
+  logic in the same pass).
 
 AI
 - Stream chat responses instead of waiting for the full completion.
@@ -121,3 +110,20 @@ MONETIZATION / PRODUCT (loose, unranked)
 
 
 
+On the two disclosed tradeoffs:
+
+1. Options no longer suggestable for high-risk users — CC's right 
+that this path was never grounded before anyway, so you're not losing 
+real functionality, just an ungrounded placeholder. I'd call this a 
+non-issue for now — worth a one-line note in IDEAS.txt if you want 
+options support later, but not worth solving today.
+
+2. Event-loop blocking, now several calls deep — this one I'd take 
+more seriously, but not urgently. It's fine with zero concurrent 
+users (now), but it's the kind of thing that turns into a real bug 
+the moment two people hit /recommendations at once — one user's 
+request blocks everyone else's for ~10s. The likely fix is small 
+(FastAPI runs sync def route handlers in a threadpool automatically, 
+or wrap the blocking calls in run_in_threadpool) but it's app-wide, 
+not specific to this endpoint, so it's a reasonable thing to batch 
+with your Sprint 8-9 bug pass rather than solve mid-sprint-6.

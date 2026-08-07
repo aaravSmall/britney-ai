@@ -1,10 +1,14 @@
 """
 Standalone news ingestion for the britney.ai trading agent.
 
-Pulls company news from Finnhub's free tier for the tickers in the three
-target portfolios (conservative/moderate/aggressive), throttles calls to
-respect Finnhub's free-tier ~60-calls/min limit, and dedupes articles
-already delivered in a prior run via a small local sqlite cache.
+Pulls company news from Finnhub's free tier for the stock/ETF tickers in
+the three target portfolios (conservative/moderate/aggressive), and crypto
+news from CryptoPanic's free tier for the crypto tickers in those same
+portfolios — Finnhub's free /company-news endpoint doesn't cover crypto,
+so it needs a second, separate provider (see fetch_news() vs.
+fetch_crypto_news() below). Both throttle calls via the same RateLimiter,
+normalize into the exact same NewsArticle shape, and dedupe articles
+already delivered in a prior run via the same small local sqlite cache.
 
 Standalone — deliberately doesn't import app.database/app.models, so it
 can be exercised without booting FastAPI or a real database:
@@ -27,17 +31,22 @@ import httpx
 from app.config import get_settings
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
+CRYPTOPANIC_BASE_URL = "https://cryptopanic.com/api/v1"
 
 logger = logging.getLogger(__name__)
 
 # Finnhub's free tier allows ~60 calls/min; stay under that with headroom
-# in case something else in the process is also calling Finnhub.
+# in case something else in the process is also calling Finnhub. Reused
+# as-is for CryptoPanic too (see fetch_crypto_news()) — both providers'
+# free tiers are comparably rate-limited, and this is a conservative
+# shared default rather than something either provider requires exactly.
 DEFAULT_CALLS_PER_MINUTE = 50
 
 # Mirrors the three risk buckets in app/ai/recommendation_engine.py's mock
 # fallback (conservative == low risk, moderate == medium, aggressive ==
-# high). Crypto tickers are listed for completeness but skipped by news
-# ingestion — Finnhub's free company-news endpoint only covers equities/ETFs.
+# high). Stock/ETF tickers get news from fetch_news() (Finnhub); crypto
+# tickers get news from fetch_crypto_news() (CryptoPanic) — Finnhub's free
+# company-news endpoint only covers equities/ETFs.
 TARGET_PORTFOLIOS: dict[str, list[tuple[str, str]]] = {
     "conservative": [("VOO", "stock"), ("BND", "stock"), ("BTC", "crypto")],
     "moderate": [("SPY", "stock"), ("MSFT", "stock"), ("ETH", "crypto")],
@@ -64,6 +73,27 @@ def target_stock_tickers_for(tier: str) -> list[str]:
     "moderate" | "aggressive") — crypto entries in that tier are dropped
     for the same reason as target_stock_tickers()."""
     return [symbol for symbol, asset_type in TARGET_PORTFOLIOS[tier] if asset_type == "stock"]
+
+
+def target_crypto_tickers() -> list[str]:
+    """Unique, order-stable crypto tickers across all three target
+    portfolios — the ones fetch_crypto_news() (CryptoPanic) covers,
+    symmetric to target_stock_tickers()."""
+    seen: set[str] = set()
+    tickers: list[str] = []
+    for assets in TARGET_PORTFOLIOS.values():
+        for symbol, asset_type in assets:
+            if asset_type != "crypto" or symbol in seen:
+                continue
+            seen.add(symbol)
+            tickers.append(symbol)
+    return tickers
+
+
+def target_crypto_tickers_for(tier: str) -> list[str]:
+    """Crypto tickers for a single risk tier — stock/ETF entries in that
+    tier are dropped, symmetric to target_stock_tickers_for()."""
+    return [symbol for symbol, asset_type in TARGET_PORTFOLIOS[tier] if asset_type == "crypto"]
 
 
 @dataclass
@@ -179,6 +209,63 @@ def _mock_articles(ticker: str) -> list[dict]:
     ]
 
 
+def _mock_crypto_articles(ticker: str) -> list[dict]:
+    """Crypto analog of _mock_articles() — same shape, same offline-mode
+    discipline, just crypto-flavored copy so mock CryptoPanic runs don't
+    read like recycled equity headlines."""
+    now = datetime.now(timezone.utc)
+    return [
+        {
+            "id": f"{ticker}-mock-1",
+            "headline": f"{ticker} trades sideways as market awaits next catalyst",
+            "summary": (
+                "[Offline mode — add CRYPTOPANIC_API_KEY for real news] Mock "
+                f"placeholder article for {ticker}."
+            ),
+            "source": "mock",
+            "url": "",
+            "datetime": int(now.timestamp()),
+        },
+        {
+            "id": f"{ticker}-mock-2",
+            "headline": f"Analysts debate {ticker}'s next move",
+            "summary": (
+                "[Offline mode — add CRYPTOPANIC_API_KEY for real news] Second "
+                f"mock placeholder article for {ticker}."
+            ),
+            "source": "mock",
+            "url": "",
+            "datetime": int((now - timedelta(hours=6)).timestamp()),
+        },
+    ]
+
+
+def _cryptopanic_post_to_raw(post: dict) -> dict:
+    """Reshapes one CryptoPanic /posts/ result into the same intermediate
+    dict shape Finnhub articles already use (id/headline/summary/source/
+    url/datetime-as-epoch-int), so it can go through the exact same
+    _normalize() below instead of a second normalization path. CryptoPanic's
+    free tier doesn't include full article bodies, only a title — used for
+    both headline and summary, same as sentiment.py already tolerates for
+    any article with no distinct summary (`a.summary or '(no summary)'`)."""
+    published_at = post.get("published_at") or post.get("created_at")
+    ts: int | None = None
+    if published_at:
+        try:
+            ts = int(datetime.fromisoformat(published_at.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            ts = None
+    title = post.get("title", "")
+    return {
+        "id": post.get("id"),
+        "headline": title,
+        "summary": title,
+        "source": (post.get("source") or {}).get("title") or "cryptopanic",
+        "url": post.get("url", ""),
+        "datetime": ts,
+    }
+
+
 def _normalize(ticker: str, raw: dict, *, provider: str) -> NewsArticle:
     ts = raw.get("datetime")
     published_at = (
@@ -221,6 +308,24 @@ async def _fetch_ticker_news_finnhub(
     resp.raise_for_status()
     data = resp.json()
     return data if isinstance(data, list) else []
+
+
+async def _fetch_ticker_news_cryptopanic(
+    client: httpx.AsyncClient,
+    ticker: str,
+    api_key: str,
+    limiter: RateLimiter,
+) -> list[dict]:
+    await limiter.acquire()
+    resp = await client.get(
+        f"{CRYPTOPANIC_BASE_URL}/posts/",
+        params={"auth_token": api_key, "currencies": ticker, "public": "true"},
+        timeout=10.0,
+    )
+    logger.info("cryptopanic posts request: %s status=%s", ticker, resp.status_code)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("results", []) if isinstance(data, dict) else []
 
 
 async def fetch_news(
@@ -301,19 +406,103 @@ async def fetch_news(
     return results
 
 
+async def fetch_crypto_news(
+    tickers: list[str] | None = None,
+    *,
+    store: SeenArticleStore | None = None,
+    calls_per_minute: int = DEFAULT_CALLS_PER_MINUTE,
+) -> list[NewsArticle]:
+    """Crypto analog of fetch_news() — same NewsArticle shape, same
+    SeenArticleStore dedupe discipline (does NOT mark articles seen
+    itself, see SeenArticleStore's docstring), same mock-fallback/logging
+    pattern, same RateLimiter — sourced from CryptoPanic instead of
+    Finnhub, since Finnhub's free /company-news endpoint doesn't cover
+    crypto. Kept as a separate function rather than merged into
+    fetch_news() so each provider's request shape and error handling stay
+    independent; callers that want both call each function separately and
+    combine the results (see _main() below for the standalone example).
+    """
+    settings = get_settings()
+    tickers = tickers or target_crypto_tickers()
+    store = store or SeenArticleStore()
+    results: list[NewsArticle] = []
+
+    if not settings.cryptopanic_api_key:
+        logger.warning(
+            "MOCK MODE: CRYPTOPANIC_API_KEY not set — returning offline placeholder "
+            "articles instead of calling the real CryptoPanic API."
+        )
+        for ticker in tickers:
+            for raw in _mock_crypto_articles(ticker):
+                article = _normalize(ticker, raw, provider="mock")
+                if store.has_seen(article.article_id):
+                    continue
+                results.append(article)
+        return results
+
+    logger.info("CRYPTOPANIC_API_KEY loaded — calling the real CryptoPanic API.")
+    limiter = RateLimiter(calls_per_minute)
+    failed_tickers: list[str] = []
+    async with httpx.AsyncClient() as client:
+        for ticker in tickers:
+            try:
+                raw_posts = await _fetch_ticker_news_cryptopanic(
+                    client, ticker, settings.cryptopanic_api_key, limiter
+                )
+            except httpx.HTTPError as exc:
+                # Skip this ticker for this run; the next scheduled run retries.
+                failed_tickers.append(ticker)
+                logger.error("REAL API CALL FAILED for %s: %s", ticker, exc)
+                continue
+            new_count = 0
+            for post in raw_posts:
+                article = _normalize(ticker, _cryptopanic_post_to_raw(post), provider="cryptopanic")
+                if store.has_seen(article.article_id):
+                    continue
+                results.append(article)
+                new_count += 1
+            logger.info(
+                "%s: %d fetched, %d new (%d already seen)",
+                ticker, len(raw_posts), new_count, len(raw_posts) - new_count,
+            )
+
+    if failed_tickers:
+        logger.warning(
+            "Real CryptoPanic API call failed for %d/%d ticker(s): %s",
+            len(failed_tickers), len(tickers), ", ".join(failed_tickers),
+        )
+    elif not results:
+        logger.info(
+            "REAL API CALL SUCCEEDED, ZERO NEW ARTICLES: CryptoPanic returned no "
+            "new (unseen) posts for any of %d ticker(s).",
+            len(tickers),
+        )
+
+    return results
+
+
 async def _main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # httpx logs the full request URL at INFO level, which includes
-    # ?token=<FINNHUB_API_KEY> in plaintext — drop it to WARNING so the key
-    # never lands in logs. Our own "finnhub company-news request" log line
-    # already reports ticker + status code without the token.
+    # ?token=<FINNHUB_API_KEY> / ?auth_token=<CRYPTOPANIC_API_KEY> in
+    # plaintext — drop it to WARNING so neither key ever lands in logs. Our
+    # own "finnhub company-news request"/"cryptopanic posts request" log
+    # lines already report ticker + status code without the token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # Standalone smoke-test entry point — nothing downstream consumes these
     # articles, so intentionally does NOT mark them processed (see
     # SeenArticleStore's docstring). Running this script is safe to repeat
-    # and won't steal articles from decision_loop.py's real pipeline.
-    articles = await fetch_news()
-    print(f"Fetched {len(articles)} unprocessed article(s):")
+    # and won't steal articles from decision_loop.py's real pipeline. Calls
+    # both providers separately (same pattern decision_loop.py would use to
+    # combine them) rather than merging into one fetch call.
+    stock_articles = await fetch_news()
+    crypto_articles = await fetch_crypto_news()
+    articles = stock_articles + crypto_articles
+    print(
+        f"Fetched {len(articles)} unprocessed article(s) "
+        f"({len(stock_articles)} stock/ETF via Finnhub, "
+        f"{len(crypto_articles)} crypto via CryptoPanic):"
+    )
     for a in articles:
         print(f"  [{a.ticker}] {a.headline!r} — {a.source} ({a.published_at.isoformat()})")
 
