@@ -195,8 +195,16 @@ class _TradeHistoryScreenState extends State<TradeHistoryScreen> {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
 
+    // No backgroundColor override (unlike dashboard_screen.dart's Scaffolds):
+    // this route is pushed at the top level, outside StatefulShellRoute's
+    // _MainShell — the only widget that paints the dark/light gradient
+    // behind shell-tab screens. Colors.transparent here would show nothing
+    // but Flutter's default white canvas, i.e. this always renders "light"
+    // regardless of theme. Falling back to the theme's real
+    // scaffoldBackgroundColor (a flat, correctly dark/light color) matches
+    // how onboarding_screen.dart and login_screen.dart — the app's other
+    // top-level routes — already handle this.
     return Scaffold(
-      backgroundColor: Colors.transparent,
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
