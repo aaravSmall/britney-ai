@@ -177,31 +177,49 @@ def _sync_fetch_quote_info(ticker: str) -> dict[str, Any]:
 async def quote(ticker: str) -> dict[str, Any] | None:
     """Returns None for "not found" — the route maps that straight to a
     404, matching the requirement that an invalid ticker never leaks
-    yfinance's own error as a 500. A live-data outage for an arbitrary
-    (non-demo) ticker also lands here as None: there's no sensible mock
-    quote to fabricate for a ticker we don't otherwise know anything
-    about, so "not found" is the honest response — only the demo
-    universe (_MOCK_PRICES) gets a degraded-but-real mock quote."""
+    yfinance's own error as a 500 (the fetch itself is always wrapped in
+    try/except below, regardless of ticker).
+
+    Two different things can produce that same "no data" outcome, and
+    they're kept distinct via `fetch_error` so the logs never confuse
+    one for the other:
+    - the fetch call raised (network error, timeout, Yahoo's crumb/
+      cookie handshake blocking us, rate limiting, ...) — a real
+      failure, logged at ERROR;
+    - yfinance returned cleanly but with no usable price — a genuinely
+      unknown/invalid ticker, logged at INFO.
+
+    Either way, a ticker in the small demo universe (_MOCK_PRICES) still
+    gets a real, labeled-as-mock quote instead of a 404 — the same
+    mock-fallback convention market_data.py/news_ingestion.py use. An
+    arbitrary (non-demo) ticker has no sensible quote to fabricate, so
+    it 404s in both cases — but only the failure case logs it loudly,
+    since that's the one worth alerting on (a real outage), not the
+    other (someone just searched a bad ticker)."""
     key = ticker.upper()
     cached = _cache_get(_quote_cache, key)
     if cached is not None or key in _quote_cache:
         return cached
 
     info: dict[str, Any] = {}
+    fetch_error: Exception | None = None
     try:
         info = await run_in_threadpool(_sync_fetch_quote_info, key)
     except Exception as exc:
-        logger.warning(
-            "quote fetch error for %s: %s: %s — falling through to mock/not-found.",
-            key, type(exc).__name__, exc,
-        )
+        fetch_error = exc
         info = {}
 
     price = info.get("regularMarketPrice") or info.get("currentPrice")
     if price is None:
         if key in _MOCK_PRICES:
+            # Same log line regardless of *why* live data is missing (a
+            # raised exception and a clean-but-empty yfinance response
+            # both land here) — either way the caller gets a real,
+            # labeled-as-mock quote instead of a 404, which is what
+            # matters for a symbol we actually know about.
             logger.warning(
-                "mock fallback (no live data) — using the offline demo quote for %s.",
+                "mock fallback (no live data%s) — using the offline demo quote for %s.",
+                f": {type(fetch_error).__name__}: {fetch_error}" if fetch_error else "",
                 key,
             )
             result = {
@@ -228,7 +246,26 @@ async def quote(ticker: str) -> dict[str, Any] | None:
             _cache_set(_quote_cache, key, result, QUOTE_TTL_SECONDS)
             return result
 
-        logger.info("quote not found for %s — no live data and not in the demo set.", key)
+        if fetch_error is not None:
+            # Distinguish this from a genuine not-found: the fetch itself
+            # blew up (network error, timeout, Yahoo's crumb/cookie
+            # handshake blocking us, rate limiting, ...) for a ticker
+            # that's not in the small demo set, so there's no fallback
+            # quote to serve. Still surfaces as 404 to the caller (we
+            # have nothing to return either way) but ERROR + a distinct
+            # message keeps this from being confused with a confirmed-bad
+            # ticker when grepping logs — a real outage should be loud.
+            logger.error(
+                "quote fetch FAILED for %s (%s: %s) — not a confirmed-invalid "
+                "ticker, just no live data and no mock fallback available for it.",
+                key, type(fetch_error).__name__, fetch_error,
+            )
+        else:
+            logger.info(
+                "quote not found for %s — yfinance returned no market data "
+                "(ticker likely doesn't exist) and it's not in the demo set.",
+                key,
+            )
         _cache_set(_quote_cache, key, None, QUOTE_TTL_SECONDS)
         return None
 
