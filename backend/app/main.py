@@ -2,6 +2,7 @@
 britney.ai FastAPI application entrypoint.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,13 +22,22 @@ from app.routes import (
     users,
 )
 
+# Without this, nothing configures the root logger in this process, so
+# every logger.info/warning/error call anywhere in the app (including
+# agent/sentiment.py and agent/news_ingestion.py's own "real vs mock"
+# logging, now also exercised here via the recommendation engine) is
+# silently dropped — those modules' loud logging has only ever actually
+# been visible when run through agent/run_agent.py's own
+# _configure_logging(), a separate process from this one. uvicorn's own
+# LOGGING_CONFIG has disable_existing_loggers=False, so this doesn't
+# conflict with uvicorn's access/error log setup applied after import.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     if not settings.auth_disabled and not settings.firebase_credentials_path:
-        import logging
-
         logging.getLogger(__name__).warning(
             "Production auth: set FIREBASE_CREDENTIALS_PATH or AUTH_DISABLED=true for dev."
         )
