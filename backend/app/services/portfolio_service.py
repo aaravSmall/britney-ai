@@ -167,6 +167,7 @@ async def build_dashboard(db: Session, user: User) -> DashboardResponse:
     day_change = _day_change_pct(db, portfolio.id, total_value)
 
     return DashboardResponse(
+        portfolio_id=portfolio.id,
         cash_balance=cash,
         total_portfolio_value=round(total_value, 2),
         day_change_pct=day_change,

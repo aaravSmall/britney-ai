@@ -7,6 +7,7 @@ import '../screens/dashboard_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/recommendations_screen.dart';
+import '../screens/trade_history_screen.dart';
 import '../services/auth_controller.dart';
 import '../theme/app_theme.dart';
 
@@ -31,6 +32,16 @@ GoRouter createRouter(AuthController auth) {
       GoRoute(
         path: '/onboarding',
         builder: (_, __) => const OnboardingScreen(),
+      ),
+      GoRoute(
+        // A path param (not `extra`) so this survives a Flutter-web page
+        // refresh/deep link, which reconstructs routes from the URL alone
+        // and would otherwise crash on a null `extra`.
+        path: '/trade-history/:portfolioId',
+        builder: (_, state) {
+          final id = int.tryParse(state.pathParameters['portfolioId'] ?? '');
+          return TradeHistoryScreen(portfolioId: id);
+        },
       ),
       // StatefulShellRoute.indexedStack keeps each tab's widget tree (and
       // state — dashboard data, scroll position, chat history, etc.) alive

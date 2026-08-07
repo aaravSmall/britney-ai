@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../data/chart_kind.dart';
@@ -380,6 +381,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(height: 10),
             ...holdings.map((h) => _HoldingTile(h)),
+            const SizedBox(height: 20),
+            Card(
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                leading: const Icon(Icons.receipt_long_rounded),
+                title: const Text('Trade History'),
+                subtitle: Text(
+                  'Your trades and agent activity',
+                  style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => context.push('/trade-history/${dashboard['portfolio_id']}'),
+              ),
+            ),
           ],
         ),
       ),

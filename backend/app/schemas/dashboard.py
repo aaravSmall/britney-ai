@@ -13,6 +13,7 @@ class HoldingOut(BaseModel):
 
 
 class DashboardResponse(BaseModel):
+    portfolio_id: int
     cash_balance: float
     total_portfolio_value: float
     day_change_pct: float | None
