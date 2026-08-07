@@ -7,6 +7,7 @@ import '../screens/dashboard_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/recommendations_screen.dart';
+import '../screens/search_screen.dart';
 import '../screens/stock_detail_screen.dart';
 import '../screens/trade_history_screen.dart';
 import '../services/auth_controller.dart';
@@ -54,6 +55,13 @@ GoRouter createRouter(AuthController auth) {
           final ticker = state.pathParameters['ticker'] ?? '';
           return StockDetailScreen(ticker: ticker);
         },
+      ),
+      GoRoute(
+        // Reached from the dashboard tab's search icon (see
+        // dashboard_screen.dart) — top-level like /stock/:ticker above,
+        // not nested in the shell.
+        path: '/search',
+        builder: (_, __) => const SearchScreen(),
       ),
       // StatefulShellRoute.indexedStack keeps each tab's widget tree (and
       // state — dashboard data, scroll position, chat history, etc.) alive

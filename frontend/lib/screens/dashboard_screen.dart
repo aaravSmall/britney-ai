@@ -251,10 +251,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ],
     );
 
+    // The one entry point into stock search (step 5) — a dedicated
+    // screen/route, not a persistent search bar, since no shared AppBar
+    // exists across the bottom-nav tabs (_MainShell's own Scaffold has no
+    // appBar at all; every tab, including this one, builds its own).
+    // Placed on this tab specifically because it's where the user lands
+    // after login (app_router.dart's redirect defaults to /home).
+    final appBar = AppBar(
+      title: titleWidget,
+      actions: [
+        IconButton(
+          tooltip: 'Search stocks',
+          onPressed: () => context.push('/search'),
+          icon: const Icon(Icons.search_rounded),
+        ),
+      ],
+    );
+
     if (_loading && _dashboard == null) {
       return Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: AppBar(title: titleWidget),
+        appBar: appBar,
         body: const Center(child: CircularProgressIndicator(color: AppTheme.accent)),
       );
     }
@@ -262,7 +279,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (_error != null && _dashboard == null) {
       return Scaffold(
         backgroundColor: Colors.transparent,
-        appBar: AppBar(title: titleWidget),
+        appBar: appBar,
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(32),
@@ -314,7 +331,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(title: titleWidget),
+      appBar: appBar,
       body: RefreshIndicator(
         color: AppTheme.accent,
         onRefresh: _loadPortfolioData,
