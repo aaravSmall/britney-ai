@@ -38,8 +38,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _error;
   Map<String, dynamic>? _dashboard;
   List<Map<String, dynamic>> _performance = [];
+  // The caller's own portfolio, plus the agent's three risk-tier model
+  // portfolios (see GET /portfolios) — populates the switcher.
+  List<Map<String, dynamic>> _portfolios = [];
+  int? _selectedPortfolioId;
   bool _started = false;
   PortfolioBus? _portfolioBus;
+
+  int? get _myPortfolioId {
+    for (final p in _portfolios) {
+      if (p['owner_type'] == 'user') return p['id'] as int;
+    }
+    return null;
+  }
+
+  bool get _isMyPortfolioSelected =>
+      _selectedPortfolioId != null && _selectedPortfolioId == _myPortfolioId;
+
+  Map<String, dynamic>? get _selectedPortfolio {
+    for (final p in _portfolios) {
+      if (p['id'] == _selectedPortfolioId) return p;
+    }
+    return null;
+  }
 
   @override
   void didChangeDependencies() {
@@ -54,10 +75,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _load();
   }
 
-  // A trade filled elsewhere (recommendations screen) — refetch so cash and
-  // holdings shown here stay in sync.
+  // A trade filled elsewhere (recommendations screen) always affects the
+  // signed-in user's own portfolio — refetch whatever's currently selected
+  // so cash/holdings stay in sync if that's what's showing; harmless (if
+  // slightly redundant) when an agent portfolio is selected instead.
   void _onPortfolioTraded() {
-    if (mounted) _load();
+    if (mounted) _loadPortfolioData();
   }
 
   @override
@@ -66,6 +89,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
+  /// Fetches the switcher's portfolio list, picks a default selection (the
+  /// user's own) on first load, then loads that portfolio's data.
   Future<void> _load() async {
     final api = context.read<ApiService>();
     setState(() {
@@ -73,10 +98,50 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _error = null;
     });
     try {
+      final res = await api.get('/portfolios');
+      if (!mounted) return;
+      if (res.statusCode != 200) {
+        setState(() {
+          _error = 'Failed to load portfolios: ${res.body}';
+          _loading = false;
+        });
+        return;
+      }
+      final list = (jsonDecode(res.body) as List<dynamic>)
+          .map((e) => e as Map<String, dynamic>)
+          .toList();
+      setState(() => _portfolios = list);
+      _selectedPortfolioId ??=
+          _myPortfolioId ?? (list.isNotEmpty ? list.first['id'] as int : null);
+      await _loadPortfolioData();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = 'Network error: $e';
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  /// Fetches dashboard + performance for [_selectedPortfolioId]. "My
+  /// Portfolio" uses the existing authenticated /dashboard endpoints;
+  /// any other (agent) portfolio uses the portfolio-id-scoped ones from
+  /// Sprint 6 Part 2, which intentionally have no auth of their own yet.
+  Future<void> _loadPortfolioData() async {
+    final id = _selectedPortfolioId;
+    if (id == null) return;
+    final mine = id == _myPortfolioId;
+    final api = context.read<ApiService>();
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
       final results = await Future.wait([
-        api.get('/dashboard'),
+        api.get(mine ? '/dashboard' : '/portfolios/$id/summary'),
         api.get('/users/me'),
-        api.get('/dashboard/performance'),
+        api.get(mine ? '/dashboard/performance' : '/portfolios/$id/performance'),
       ]);
       if (!mounted) return;
       final dashRes = results[0];
@@ -106,6 +171,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _switchPortfolio(int id) {
+    if (id == _selectedPortfolioId) return;
+    setState(() {
+      _selectedPortfolioId = id;
+      _dashboard = null;
+      _performance = [];
+    });
+    _loadPortfolioData();
   }
 
   Future<void> _toggleAuto(bool v) async {
@@ -168,16 +243,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final use24Hour = context.watch<TimeFormatController>().use24Hour;
     final t = Theme.of(context).textTheme;
 
+    // The switcher (and its "loading"/error retry) stays visible through
+    // every state below — losing it mid-load would strand the user unable
+    // to pick a different portfolio while one is failing to fetch.
+    final titleWidget = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _PortfolioSwitcher(
+          portfolios: _portfolios,
+          selectedId: _selectedPortfolioId,
+          onSelected: _switchPortfolio,
+        ),
+        Text(
+          _isMyPortfolioSelected ? _greeting() : 'Managed by the trading agent',
+          style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+        ),
+      ],
+    );
+
     if (_loading && _dashboard == null) {
-      return const Scaffold(
+      return Scaffold(
         backgroundColor: Colors.transparent,
-        body: Center(child: CircularProgressIndicator(color: AppTheme.accent)),
+        appBar: AppBar(title: titleWidget),
+        body: const Center(child: CircularProgressIndicator(color: AppTheme.accent)),
       );
     }
 
     if (_error != null && _dashboard == null) {
       return Scaffold(
         backgroundColor: Colors.transparent,
+        appBar: AppBar(title: titleWidget),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(32),
@@ -196,7 +291,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   style: t.bodyMedium?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
                 const SizedBox(height: 16),
-                FilledButton(onPressed: _load, child: const Text('Try again')),
+                FilledButton(
+                  onPressed: _selectedPortfolioId == null ? _load : _loadPortfolioData,
+                  child: const Text('Try again'),
+                ),
               ],
             ),
           ),
@@ -222,70 +320,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .map((e) => e as Map<String, dynamic>)
         .toList();
 
+    final isMine = _isMyPortfolioSelected;
+
     return Scaffold(
       backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Portfolio',
-              style: t.titleLarge?.copyWith(fontWeight: FontWeight.w600),
-            ),
-            Text(
-              _greeting(),
-              style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
-            ),
-          ],
-        ),
-      ),
+      appBar: AppBar(title: titleWidget),
       body: RefreshIndicator(
         color: AppTheme.accent,
-        onRefresh: _load,
+        onRefresh: _loadPortfolioData,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 100),
           children: [
-            Row(
-              children: [
-                CircleAvatar(
-                  radius: 26,
-                  backgroundColor: AppTheme.accent.withValues(alpha: 0.15),
-                  child: Text(
-                    auth.displayName.isNotEmpty
-                        ? auth.displayName[0].toUpperCase()
-                        : '?',
-                    style: const TextStyle(
-                      color: AppTheme.accent,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
+            if (isMine)
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 26,
+                    backgroundColor: AppTheme.accent.withValues(alpha: 0.15),
+                    child: Text(
+                      auth.displayName.isNotEmpty
+                          ? auth.displayName[0].toUpperCase()
+                          : '?',
+                      style: const TextStyle(
+                        color: AppTheme.accent,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        auth.displayName,
-                        style: t.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (auth.displayEmail != null &&
-                          auth.displayEmail!.isNotEmpty)
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Text(
-                          auth.displayEmail!,
+                          auth.displayName,
+                          style: t.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (auth.displayEmail != null &&
+                            auth.displayEmail!.isNotEmpty)
+                          Text(
+                            auth.displayEmail!,
+                            style: t.bodySmall?.copyWith(
+                              color: AppTheme.textSecondaryOf(context),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              )
+            else
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 26,
+                    backgroundColor: AppTheme.accent.withValues(alpha: 0.15),
+                    child: const Icon(
+                      Icons.auto_awesome_rounded,
+                      color: AppTheme.accent,
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _selectedPortfolio?['label'] as String? ?? 'Agent Portfolio',
+                          style: t.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                        Text(
+                          'Autonomous trading agent — \$10,000 starting cash',
                           style: t.bodySmall?.copyWith(
                             color: AppTheme.textSecondaryOf(context),
                           ),
                         ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
             const SizedBox(height: 8),
             Text(
               'Paper portfolio — simulated execution, illustrative only.',
@@ -341,25 +460,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
               use24Hour: use24Hour,
               hasAnyHistory: _performance.isNotEmpty,
             ),
-            const SizedBox(height: 16),
-            Card(
-              child: SwitchListTile(
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 4,
-                ),
-                title: const Text('Auto-invest (paper)'),
-                subtitle: Text(
-                  'When on, trade requests can use simulated execution.',
-                  style: t.bodySmall?.copyWith(
-                    color: AppTheme.textSecondaryOf(context),
+            // Auto-invest is a User-level setting, not a portfolio one — it
+            // has no meaning for the agent's own model portfolios.
+            if (isMine) ...[
+              const SizedBox(height: 16),
+              Card(
+                child: SwitchListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
                   ),
+                  title: const Text('Auto-invest (paper)'),
+                  subtitle: Text(
+                    'When on, trade requests can use simulated execution.',
+                    style: t.bodySmall?.copyWith(
+                      color: AppTheme.textSecondaryOf(context),
+                    ),
+                  ),
+                  value: _auto,
+                  activeThumbColor: AppTheme.accent,
+                  onChanged: _toggleAuto,
                 ),
-                value: _auto,
-                activeThumbColor: AppTheme.accent,
-                onChanged: _toggleAuto,
               ),
-            ),
+            ],
             const SizedBox(height: 20),
             Row(
               children: [
@@ -388,7 +511,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 leading: const Icon(Icons.receipt_long_rounded),
                 title: const Text('Trade History'),
                 subtitle: Text(
-                  'Your trades and agent activity',
+                  isMine ? 'Your trades and agent activity' : 'This agent portfolio\'s trades',
                   style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
@@ -397,6 +520,75 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// AppBar title that doubles as the portfolio switcher: the current
+/// selection's label with a chevron, opening a menu of every portfolio
+/// GET /portfolios returned (the user's own + the agent's three model
+/// portfolios). Falls back to a plain, non-interactive label while the
+/// list hasn't loaded yet (or failed to) rather than showing a dead-end
+/// dropdown with nothing to switch to.
+class _PortfolioSwitcher extends StatelessWidget {
+  const _PortfolioSwitcher({
+    required this.portfolios,
+    required this.selectedId,
+    required this.onSelected,
+  });
+
+  final List<Map<String, dynamic>> portfolios;
+  final int? selectedId;
+  final ValueChanged<int> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final titleStyle = t.titleLarge?.copyWith(fontWeight: FontWeight.w600);
+
+    String? label;
+    for (final p in portfolios) {
+      if (p['id'] == selectedId) {
+        label = p['label'] as String;
+        break;
+      }
+    }
+    label ??= 'Portfolio';
+
+    if (portfolios.length <= 1) {
+      return Text(label, style: titleStyle);
+    }
+
+    return PopupMenuButton<int>(
+      tooltip: 'Switch portfolio',
+      offset: const Offset(0, 44),
+      onSelected: onSelected,
+      itemBuilder: (context) => [
+        for (final p in portfolios)
+          PopupMenuItem<int>(
+            value: p['id'] as int,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  child: p['id'] == selectedId
+                      ? const Icon(Icons.check_rounded, size: 18, color: AppTheme.accent)
+                      : null,
+                ),
+                const SizedBox(width: 4),
+                Text(p['label'] as String),
+              ],
+            ),
+          ),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(child: Text(label, style: titleStyle, overflow: TextOverflow.ellipsis)),
+          const SizedBox(width: 2),
+          Icon(Icons.expand_more_rounded, color: AppTheme.textSecondaryOf(context)),
+        ],
       ),
     );
   }

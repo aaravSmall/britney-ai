@@ -142,6 +142,16 @@ def ensure_demo_holdings(db: Session, user: User) -> Portfolio:
 
 async def build_dashboard(db: Session, user: User) -> DashboardResponse:
     portfolio = ensure_demo_holdings(db, user)
+    return await build_portfolio_summary(db, portfolio)
+
+
+async def build_portfolio_summary(db: Session, portfolio: Portfolio) -> DashboardResponse:
+    """Portfolio-generic core of the dashboard: holdings valuation and
+    day-change, for any Portfolio row (a real user's or one of the agent's
+    three model portfolios). Unlike build_dashboard(), this never seeds
+    demo holdings — that's specifically for a fresh human login, and would
+    misrepresent an agent portfolio's real (possibly empty) trading
+    history if applied here (see ensure_target_portfolios' docstring)."""
     holdings_out: list[HoldingOut] = []
     total_mv = 0.0
     cash = portfolio.cash_balance

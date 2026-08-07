@@ -20,6 +20,16 @@ class DashboardResponse(BaseModel):
     holdings: list[HoldingOut]
 
 
+class PortfolioListItem(BaseModel):
+    """One entry in the portfolio switcher: the caller's own portfolio,
+    plus the agent's three risk-tier model portfolios."""
+
+    id: int
+    label: str
+    owner_type: str  # user | agent
+    risk_tolerance: str | None
+
+
 class SnapshotPointOut(BaseModel):
     """One PortfolioSnapshot row, as returned by GET /dashboard/performance."""
 
