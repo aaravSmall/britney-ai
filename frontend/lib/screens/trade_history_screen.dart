@@ -7,6 +7,7 @@ import '../services/api_service.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
+import '../widgets/trade_rationale_sheet.dart';
 
 /// One page of trade history: limit/offset pagination via
 /// GET /portfolios/{id}/trades, matching the endpoint built in Sprint 1.
@@ -277,7 +278,7 @@ class _TradeHistoryScreenState extends State<TradeHistoryScreen> {
               ),
             );
           }
-          return _TradeTile(_trades[i]);
+          return _TradeTile(_trades[i], portfolioId: widget.portfolioId!);
         },
       ),
     );
@@ -285,9 +286,10 @@ class _TradeHistoryScreenState extends State<TradeHistoryScreen> {
 }
 
 class _TradeTile extends StatelessWidget {
-  const _TradeTile(this.trade);
+  const _TradeTile(this.trade, {required this.portfolioId});
 
   final Map<String, dynamic> trade;
+  final int portfolioId;
 
   @override
   Widget build(BuildContext context) {
@@ -301,6 +303,7 @@ class _TradeTile extends StatelessWidget {
     final quantity = (trade['quantity'] as num).toDouble();
     final price = (trade['price'] as num).toDouble();
     final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
+    final isAgent = source == 'agent';
 
     final buy = side == 'buy';
     final sideColor = buy ? AppTheme.accent : AppTheme.danger;
@@ -338,7 +341,27 @@ class _TradeTile extends StatelessWidget {
               style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 6),
-            _SourceBadge(source: source),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _SourceBadge(source: source),
+                if (isAgent) ...[
+                  const SizedBox(width: 4),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => showTradeRationaleSheet(
+                      context,
+                      portfolioId: portfolioId,
+                      tradeId: trade['id'] as int,
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.all(2),
+                      child: Icon(Icons.info_outline_rounded, size: 16, color: AppTheme.accent),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ],
         ),
       ),

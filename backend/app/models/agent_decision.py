@@ -24,6 +24,17 @@ class AgentDecision(Base):
         String(64), nullable=True
     )  # e.g. "finnhub"
     news_article_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # Full citations for every article considered for this decision's
+    # ticker this run (not just the highest-confidence "driving" one) —
+    # one dict per article: article_id, ticker, headline, source, url,
+    # published_at (ISO string), sentiment, confidence, reasoning. Populated
+    # at decision time by agent/decision_loop.py from the same
+    # NewsArticle/ScoreResult objects it already has in hand; without this
+    # column, that per-article detail existed only in-process and was
+    # discarded once the run finished (news_article_ids above kept only the
+    # bare id strings, which SeenArticleStore's sqlite cache can't map back
+    # to headline/source/date/sentiment after the fact).
+    articles: Mapped[list] = mapped_column(JSON, default=list)
     sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence: Mapped[float] = mapped_column(Float)
     decision: Mapped[str] = mapped_column(String(8))  # buy | sell | hold

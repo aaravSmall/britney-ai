@@ -294,14 +294,15 @@ async def run_once(portfolio_id: int) -> RunSummary:
             scores = await sentiment.score_batch(articles)
 
             # One decision per ticker per run: take the highest-confidence
-            # article as the driving signal, but keep every article id
-            # seen for that ticker this run for full auditability.
+            # article as the driving signal, but keep every (article, score)
+            # pair seen for that ticker this run — not just their ids — so
+            # create_agent_decision() below can persist full citations
+            # (headline/source/url/published date) and each article's own
+            # sentiment score, not only the driving one's.
             driving: dict[str, tuple[NewsArticle, ScoreResult]] = {}
-            article_ids_by_ticker: dict[str, list[str]] = {}
+            scored_by_ticker: dict[str, list[tuple[NewsArticle, ScoreResult]]] = {}
             for article, score in zip(articles, scores):
-                article_ids_by_ticker.setdefault(article.ticker, []).append(
-                    article.article_id
-                )
+                scored_by_ticker.setdefault(article.ticker, []).append((article, score))
                 best = driving.get(article.ticker)
                 if best is None or score.confidence > best[1].confidence:
                     driving[article.ticker] = (article, score)
@@ -331,6 +332,7 @@ async def run_once(portfolio_id: int) -> RunSummary:
                 if note:
                     reasoning = f"{reasoning} {note}".strip()
 
+                ticker_scored = scored_by_ticker[ticker]
                 create_agent_decision(
                     db,
                     portfolio_id=portfolio.id,
@@ -339,7 +341,21 @@ async def run_once(portfolio_id: int) -> RunSummary:
                     decision=decision,
                     reasoning=reasoning,
                     news_source=article.source,
-                    news_article_ids=article_ids_by_ticker[ticker],
+                    news_article_ids=[a.article_id for a, _ in ticker_scored],
+                    articles=[
+                        {
+                            "article_id": a.article_id,
+                            "ticker": a.ticker,
+                            "headline": a.headline,
+                            "source": a.source,
+                            "url": a.url,
+                            "published_at": a.published_at.isoformat(),
+                            "sentiment": s.sentiment,
+                            "confidence": s.confidence,
+                            "reasoning": s.reasoning,
+                        }
+                        for a, s in ticker_scored
+                    ],
                     sentiment_score=_signed_sentiment_score(score),
                     trade_id=trade.id if trade else None,
                 )
@@ -349,8 +365,8 @@ async def run_once(portfolio_id: int) -> RunSummary:
                 # this ticker's articles processed. A crash/exception above
                 # this line leaves them unmarked for retry next run instead
                 # of vanishing from the dedupe cache unprocessed.
-                for article_id in article_ids_by_ticker[ticker]:
-                    store.mark_seen(article_id)
+                for a, _ in ticker_scored:
+                    store.mark_seen(a.article_id)
 
         return RunSummary(
             portfolio_id=portfolio.id,

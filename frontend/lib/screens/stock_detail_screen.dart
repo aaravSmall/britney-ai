@@ -11,6 +11,7 @@ import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/buy_sell_bottom_sheet.dart';
 import '../widgets/price_chart.dart';
+import '../widgets/trade_rationale_sheet.dart';
 
 /// Standalone stock/crypto detail page — takes a [ticker], so it works
 /// identically regardless of how the caller got here (search results,
@@ -491,6 +492,7 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
             _PositionCard(
               position: _position!,
               assetType: widget.assetType,
+              portfolioId: _positionPortfolioId!,
               recentTrades: _recentTrades,
               recentTradesLoading: _recentTradesLoading,
             ),
@@ -689,6 +691,7 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
                     _PositionCard(
                       position: position,
                       assetType: 'crypto',
+                      portfolioId: _positionPortfolioId!,
                       recentTrades: _recentTrades,
                       recentTradesLoading: _recentTradesLoading,
                     ),
@@ -864,12 +867,14 @@ class _PositionCard extends StatelessWidget {
   const _PositionCard({
     required this.position,
     required this.assetType,
+    required this.portfolioId,
     required this.recentTrades,
     required this.recentTradesLoading,
   });
 
   final Map<String, dynamic> position;
   final String assetType;
+  final int portfolioId;
   final List<Map<String, dynamic>> recentTrades;
   final bool recentTradesLoading;
 
@@ -963,6 +968,7 @@ class _PositionCard extends StatelessWidget {
                     recentTrades[i],
                     use24Hour: use24Hour,
                     isLast: i == recentTrades.length - 1,
+                    portfolioId: portfolioId,
                   ),
               ],
             ),
@@ -973,11 +979,17 @@ class _PositionCard extends StatelessWidget {
 }
 
 class _RecentTradeRow extends StatelessWidget {
-  const _RecentTradeRow(this.trade, {required this.use24Hour, required this.isLast});
+  const _RecentTradeRow(
+    this.trade, {
+    required this.use24Hour,
+    required this.isLast,
+    required this.portfolioId,
+  });
 
   final Map<String, dynamic> trade;
   final bool use24Hour;
   final bool isLast;
+  final int portfolioId;
 
   @override
   Widget build(BuildContext context) {
@@ -988,6 +1000,7 @@ class _RecentTradeRow extends StatelessWidget {
     final qty = (trade['quantity'] as num).toDouble();
     final price = (trade['price'] as num).toDouble();
     final source = trade['source'] as String;
+    final isAgent = source == 'agent';
     final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
 
     return Container(
@@ -1030,6 +1043,21 @@ class _RecentTradeRow extends StatelessWidget {
             '\$${(qty * price).toStringAsFixed(2)}',
             style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
           ),
+          if (isAgent) ...[
+            const SizedBox(width: 6),
+            InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => showTradeRationaleSheet(
+                context,
+                portfolioId: portfolioId,
+                tradeId: trade['id'] as int,
+              ),
+              child: const Padding(
+                padding: EdgeInsets.all(2),
+                child: Icon(Icons.info_outline_rounded, size: 16, color: AppTheme.accent),
+              ),
+            ),
+          ],
         ],
       ),
     );

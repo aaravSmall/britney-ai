@@ -8,7 +8,8 @@ from fastapi import APIRouter, Header, HTTPException, Query
 
 from agent.decision_loop import ensure_target_portfolios
 from app.deps import DbSession, OptionalCurrentUser, resolve_current_user
-from app.models import Portfolio, PortfolioSnapshot, Trade
+from app.models import AgentDecision, Portfolio, PortfolioSnapshot, Trade
+from app.schemas.agent_decision import AgentDecisionOut
 from app.schemas.dashboard import (
     DashboardResponse,
     HoldingPricePointOut,
@@ -242,3 +243,31 @@ def get_trade_history(
         .limit(limit)
         .all()
     )
+
+
+@router.get("/{portfolio_id}/trades/{trade_id}/decision", response_model=AgentDecisionOut)
+def get_trade_decision(
+    portfolio_id: int,
+    trade_id: int,
+    db: DbSession,
+    authorization: Annotated[str | None, Header()] = None,
+) -> AgentDecision:
+    """The AI rationale behind one agent-sourced trade — reasoning,
+    confidence, sentiment, and the full news citations considered for it
+    (see app/models/agent_decision.py) — for the trade_history_screen.dart
+    / stock_detail_screen.dart "More info" affordance on AI-badged trades.
+    404s if the trade doesn't exist, belongs to a different portfolio, or
+    has no linked decision (e.g. a user-sourced trade, or a legacy trade
+    from before this was tracked) — same posture as a missing resource,
+    not a 200 with an empty body."""
+    portfolio = db.get(Portfolio, portfolio_id)
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    _require_owner_if_user_portfolio(db, portfolio, authorization)
+
+    trade = db.get(Trade, trade_id)
+    if trade is None or trade.portfolio_id != portfolio_id:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.agent_decision is None:
+        raise HTTPException(status_code=404, detail="No AI decision recorded for this trade")
+    return trade.agent_decision
