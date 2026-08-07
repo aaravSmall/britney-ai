@@ -11,6 +11,7 @@ import '../services/auth_controller.dart';
 import '../services/portfolio_bus.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
+import '../utils/format.dart';
 import '../widgets/price_chart.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -762,20 +763,6 @@ class _SummaryCardState extends State<_SummaryCard> {
   }
 }
 
-/// Quantity for display: whole numbers as-is, fractional values to up to
-/// 8 decimal places (satoshi-level precision) with trailing zeros trimmed.
-/// A fixed 4-place format would silently round small crypto fills toward
-/// zero — e.g. a 0.00030612 BTC fill would round to "0.0003" or, for a
-/// smaller fill still, all the way to "0.0000" despite being a real,
-/// paid-for position.
-String _formatQuantity(double qty) {
-  if (qty == qty.roundToDouble()) return qty.toStringAsFixed(0);
-  var s = qty.toStringAsFixed(8);
-  s = s.replaceFirst(RegExp(r'0+$'), '');
-  if (s.endsWith('.')) s += '0';
-  return s;
-}
-
 class _HoldingTile extends StatelessWidget {
   const _HoldingTile(this.h);
 
@@ -805,7 +792,7 @@ class _HoldingTile extends StatelessWidget {
         ),
         title: Text(sym, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text(
-          '${_formatQuantity(qty)} ${h['asset_type']}',
+          '${formatQuantity(qty)} ${h['asset_type']}',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Text(

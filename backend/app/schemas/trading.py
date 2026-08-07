@@ -18,6 +18,12 @@ class TradeResponse(BaseModel):
     order_id: str | None = None
 
 
+class PriceOut(BaseModel):
+    symbol: str
+    asset_type: str
+    price: float
+
+
 class TradeOut(BaseModel):
     """A single row from Trade, as returned by the trade history endpoint."""
 
