@@ -100,11 +100,11 @@ echo "==> Creating log directory (used only if AGENT_LOG_FILE is set in .env)"
 mkdir -p "$LOG_DIR"
 chown "${APP_USER}:${APP_USER}" "$LOG_DIR"
 
-echo "==> Creating database schema (idempotent — create_all only adds missing tables)"
+echo "==> Creating/updating database schema (idempotent — adds missing tables and columns)"
 sudo -u "$APP_USER" bash -c "cd '${APP_DIR}/backend' && '${APP_DIR}/backend/.venv/bin/python' -c '
-from app.database import Base, engine
+from app.database import bootstrap_schema
 import app.models  # noqa: F401 — registers all tables on Base.metadata
-Base.metadata.create_all(bind=engine)
+bootstrap_schema()
 print(\"    Schema OK.\")
 '"
 

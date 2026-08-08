@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.database import Base, engine
+from app.database import bootstrap_schema
 from app.routes import (
     chat,
     dashboard,
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).warning(
             "Production auth: set FIREBASE_CREDENTIALS_PATH or AUTH_DISABLED=true for dev."
         )
-    Base.metadata.create_all(bind=engine)
+    bootstrap_schema()
     yield
 
 
