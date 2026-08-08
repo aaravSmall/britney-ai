@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import Portfolio, PortfolioHolding, PortfolioSnapshot, Trade, User
 from app.schemas.dashboard import DashboardResponse, HoldingOut
 from app.services import market_data
+from app.services.cash_ledger import apply_cash_delta
 
 
 class InsufficientFundsError(Exception):
@@ -59,12 +60,41 @@ def record_trade_fill(
     )
     cost = quantity * price
 
+    if side == "buy" and portfolio.cash_balance < cost:
+        raise InsufficientFundsError(
+            f"Insufficient cash: need ${cost:,.2f}, have ${portfolio.cash_balance:,.2f}"
+        )
+    if side == "sell" and (not holding or holding.quantity < quantity):
+        have = holding.quantity if holding else 0.0
+        raise InsufficientHoldingsError(
+            f"Insufficient {symbol}: trying to sell {quantity}, hold {have}"
+        )
+
+    trade = Trade(
+        portfolio_id=portfolio.id,
+        symbol=symbol,
+        asset_type=asset_type,
+        side=side,
+        quantity=quantity,
+        price=price,
+        status="filled",
+        simulated=simulated,
+        source=source,
+        order_id=order_id,
+    )
+    db.add(trade)
+    db.flush()  # assigns trade.id, needed below by the cash ledger entry
+
+    apply_cash_delta(
+        db,
+        portfolio,
+        -cost if side == "buy" else cost,
+        "trade",
+        trade_id=trade.id,
+        note=f"{side.upper()} {quantity} {symbol} @ ${price:,.2f}",
+    )
+
     if side == "buy":
-        if portfolio.cash_balance < cost:
-            raise InsufficientFundsError(
-                f"Insufficient cash: need ${cost:,.2f}, have ${portfolio.cash_balance:,.2f}"
-            )
-        portfolio.cash_balance -= cost
         if holding:
             new_qty = holding.quantity + quantity
             holding.avg_cost = (
@@ -83,30 +113,10 @@ def record_trade_fill(
             )
             db.add(holding)
     else:  # sell
-        if not holding or holding.quantity < quantity:
-            have = holding.quantity if holding else 0.0
-            raise InsufficientHoldingsError(
-                f"Insufficient {symbol}: trying to sell {quantity}, hold {have}"
-            )
-        portfolio.cash_balance += cost
         holding.quantity -= quantity
         holding.last_price = price
         if holding.quantity <= 1e-9:
             db.delete(holding)
-
-    trade = Trade(
-        portfolio_id=portfolio.id,
-        symbol=symbol,
-        asset_type=asset_type,
-        side=side,
-        quantity=quantity,
-        price=price,
-        status="filled",
-        simulated=simulated,
-        source=source,
-        order_id=order_id,
-    )
-    db.add(trade)
 
     db.commit()
     db.refresh(portfolio)

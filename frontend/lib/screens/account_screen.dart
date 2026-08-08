@@ -1,11 +1,45 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../services/api_service.dart';
 import '../services/auth_controller.dart';
 import '../services/theme_controller.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
+import '../widgets/cash_amount_sheet.dart';
+
+/// Resolves the signed-in user's own portfolio id (as opposed to one of
+/// the agent's three model portfolios) and opens the deposit/withdraw
+/// sheet for it. Looked up fresh on each tap rather than cached on the
+/// screen's state, since AccountScreen otherwise carries no portfolio
+/// data at all — same "fetch what you need when you need it" approach
+/// buy_sell_bottom_sheet.dart's price lookup uses.
+Future<void> _openCashSheet(BuildContext context, String action) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final api = context.read<ApiService>();
+  try {
+    final res = await api.get('/portfolios');
+    if (res.statusCode != 200) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not load your portfolio (${res.statusCode})')),
+      );
+      return;
+    }
+    final list = (jsonDecode(res.body) as List).cast<Map<String, dynamic>>();
+    final mine = list.where((p) => p['owner_type'] == 'user').toList();
+    if (mine.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('No portfolio found for your account')));
+      return;
+    }
+    if (!context.mounted) return;
+    await showCashAmountSheet(context, portfolioId: mine.first['id'] as int, action: action);
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('Network error: $e')));
+  }
+}
 
 class AccountScreen extends StatelessWidget {
   const AccountScreen({super.key});
@@ -98,6 +132,42 @@ class AccountScreen extends StatelessWidget {
               ),
               trailing: const Icon(Icons.chevron_right_rounded),
               onTap: () => context.push('/onboarding'),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            'Cash',
+            style: t.titleSmall?.copyWith(
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textSecondaryOf(context),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.add_circle_outline_rounded),
+                  title: const Text('Add funds'),
+                  subtitle: Text(
+                    'Simulated cash, paper trading only',
+                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => _openCashSheet(context, 'deposit'),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.remove_circle_outline_rounded),
+                  title: const Text('Withdraw funds'),
+                  subtitle: Text(
+                    'Simulated cash, paper trading only',
+                    style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => _openCashSheet(context, 'withdraw'),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 20),

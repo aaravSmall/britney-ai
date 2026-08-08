@@ -44,6 +44,9 @@ class Portfolio(Base):
     agent_decisions = relationship(
         "AgentDecision", back_populates="portfolio", cascade="all, delete-orphan"
     )
+    cash_ledger_entries = relationship(
+        "CashLedgerEntry", back_populates="portfolio", cascade="all, delete-orphan"
+    )
 
 
 class PortfolioSnapshot(Base):
