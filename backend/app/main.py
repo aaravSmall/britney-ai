@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import bootstrap_schema
 from app.routes import (
+    auto_invest,
     cash,
     chat,
     dashboard,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_routes.router)
     app.include_router(stocks.router)
     app.include_router(favorites.router)
+    app.include_router(auto_invest.router)
     return app
 
 

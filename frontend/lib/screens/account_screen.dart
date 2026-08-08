@@ -9,6 +9,8 @@ import '../services/auth_controller.dart';
 import '../services/theme_controller.dart';
 import '../services/time_format_controller.dart';
 import '../theme/app_theme.dart';
+import '../utils/format.dart';
+import '../widgets/add_auto_invest_sheet.dart';
 import '../widgets/cash_amount_sheet.dart';
 
 /// Resolves the signed-in user's own portfolio id (as opposed to one of
@@ -170,6 +172,8 @@ class AccountScreen extends StatelessWidget {
               ],
             ),
           ),
+          const SizedBox(height: 20),
+          const _AutoInvestSection(),
           const SizedBox(height: 20),
           Text(
             'Settings',
@@ -341,6 +345,195 @@ class _TimeFormatSelector extends StatelessWidget {
       selected: {timeFormat.use24Hour},
       showSelectedIcon: false,
       onSelectionChanged: (s) => timeFormat.setUse24Hour(s.first),
+    );
+  }
+}
+
+const Map<String, String> _intervalLabels = {
+  'daily': 'Daily',
+  'weekly': 'Weekly',
+  'monthly': 'Monthly',
+};
+
+/// Lists the signed-in user's recurring auto-invest schedules and lets
+/// them add/toggle/delete one. Unrelated to the "Auto-invest (paper)"
+/// switch on the dashboard (User.auto_invest_enabled, which only gates
+/// simulated-vs-live execution on manually submitted trades) — that
+/// toggle and its label are untouched by this section.
+class _AutoInvestSection extends StatefulWidget {
+  const _AutoInvestSection();
+
+  @override
+  State<_AutoInvestSection> createState() => _AutoInvestSectionState();
+}
+
+class _AutoInvestSectionState extends State<_AutoInvestSection> {
+  bool _loading = true;
+  String? _error;
+  List<Map<String, dynamic>> _schedules = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final api = context.read<ApiService>();
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final res = await api.get('/auto-invest/schedules');
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        setState(() {
+          _schedules = list.map((e) => e as Map<String, dynamic>).toList();
+          _loading = false;
+        });
+      } else {
+        setState(() {
+          _error = 'Could not load schedules (${res.statusCode}).';
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'Network error: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _addSchedule() async {
+    final created = await showAddAutoInvestSheet(context);
+    if (created != null && mounted) {
+      setState(() => _schedules = [created, ..._schedules]);
+    }
+  }
+
+  Future<void> _toggleEnabled(Map<String, dynamic> schedule, bool value) async {
+    final api = context.read<ApiService>();
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      schedule['enabled'] = value;
+    });
+    final res = await api.patch(
+      '/auto-invest/schedules/${schedule['id']}',
+      {'enabled': value},
+    );
+    if (res.statusCode != 200 && mounted) {
+      setState(() => schedule['enabled'] = !value);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not update schedule (${res.statusCode}).')),
+      );
+    }
+  }
+
+  Future<void> _deleteSchedule(Map<String, dynamic> schedule) async {
+    final api = context.read<ApiService>();
+    final messenger = ScaffoldMessenger.of(context);
+    final res = await api.delete('/auto-invest/schedules/${schedule['id']}');
+    if (res.statusCode == 204 && mounted) {
+      setState(() => _schedules.removeWhere((s) => s['id'] == schedule['id']));
+    } else if (mounted) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not delete schedule (${res.statusCode}).')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final use24Hour = context.watch<TimeFormatController>().use24Hour;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              'Auto-invest',
+              style: t.titleSmall?.copyWith(
+                fontWeight: FontWeight.w600,
+                color: AppTheme.textSecondaryOf(context),
+              ),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.add_circle_outline_rounded),
+              tooltip: 'New schedule',
+              onPressed: _addSchedule,
+            ),
+          ],
+        ),
+        if (_loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: LinearProgressIndicator(minHeight: 2, color: AppTheme.accent),
+          )
+        else if (_error != null)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.error_outline_rounded, color: AppTheme.danger),
+              title: Text(_error!),
+              trailing: TextButton(onPressed: _load, child: const Text('Retry')),
+            ),
+          )
+        else if (_schedules.isEmpty)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.auto_awesome_rounded),
+              title: const Text('No schedules yet'),
+              subtitle: Text(
+                'Recurring buys of a fixed dollar amount, simulated cash only.',
+                style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+              ),
+            ),
+          )
+        else
+          Card(
+            child: Column(
+              children: [
+                for (final schedule in _schedules) ...[
+                  if (schedule != _schedules.first) const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.auto_awesome_rounded),
+                    title: Text(
+                      '${schedule['ticker']} · \$${(schedule['amount'] as num).toStringAsFixed(2)} '
+                      '${_intervalLabels[schedule['interval']] ?? schedule['interval']}',
+                    ),
+                    subtitle: Text(
+                      schedule['last_executed_at'] == null
+                          ? 'Never run yet'
+                          : 'Last run: ${formatTradeTime(DateTime.parse(schedule['last_executed_at'] as String).toLocal(), use24Hour)}',
+                      style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Switch(
+                          value: schedule['enabled'] as bool,
+                          activeThumbColor: AppTheme.accent,
+                          onChanged: (v) => _toggleEnabled(schedule, v),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline_rounded, color: AppTheme.danger),
+                          tooltip: 'Delete schedule',
+                          onPressed: () => _deleteSchedule(schedule),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
