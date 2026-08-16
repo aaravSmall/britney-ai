@@ -24,11 +24,10 @@ import logging
 import os
 import sys
 from datetime import datetime
-from datetime import time as dtime
 from logging.handlers import RotatingFileHandler
-from zoneinfo import ZoneInfo
 
-from agent.decision_loop import ensure_target_portfolios, run_once
+from agent.decision_loop import ensure_target_portfolios, fill_due_pending_trades, run_once
+from agent.market_hours import MARKET_TZ, is_market_hours, next_market_open
 from agent.snapshot import snapshot_capture
 from app.database import SessionLocal, bootstrap_schema
 
@@ -57,22 +56,8 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
-MARKET_TZ = ZoneInfo("America/New_York")
-MARKET_OPEN = dtime(9, 30)
-MARKET_CLOSE = dtime(16, 0)
-
 MARKET_HOURS_POLL_MINUTES = 15
 AFTER_HOURS_POLL_MINUTES = 60
-
-
-def is_market_hours(now_et: datetime | None = None) -> bool:
-    """Weekday + 9:30-16:00 ET. No holiday calendar (Thanksgiving, etc.
-    will read as "open") — acceptable for an MVP scheduler; a bad poll on
-    a market holiday just finds no fresh news and no-ops."""
-    now_et = now_et or datetime.now(MARKET_TZ)
-    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
-    return MARKET_OPEN <= now_et.time() < MARKET_CLOSE
 
 
 async def _run_all(portfolio_ids: list[int]) -> None:
@@ -103,6 +88,18 @@ async def _run_all(portfolio_ids: list[int]) -> None:
             logger.exception("Snapshot capture crashed unexpectedly for portfolio %s", portfolio_id)
 
 
+async def _fill_pending_trades() -> None:
+    db = SessionLocal()
+    try:
+        filled = await fill_due_pending_trades(db)
+        if filled:
+            logger.info("Filled %d pending trade(s) queued for market open", filled)
+    except Exception:
+        logger.exception("Filling due pending trades crashed unexpectedly")
+    finally:
+        db.close()
+
+
 async def run_forever(portfolio_ids: list[int] | None = None) -> None:
     while True:
         ids = portfolio_ids
@@ -113,16 +110,42 @@ async def run_forever(portfolio_ids: list[int] | None = None) -> None:
             finally:
                 db.close()
 
+        # Catch-up safety net: also attempted every regular cycle (not just
+        # the precise 9:30 wake below), so a pending trade from a night the
+        # process happened to be down/restarting still fills on the first
+        # cycle after startup instead of waiting for the next 9:30 open.
+        # fill_due_pending_trades() only touches rows whose
+        # scheduled_execution_time has actually arrived, so this is a
+        # no-op on every cycle where nothing is due.
+        await _fill_pending_trades()
+
         await _run_all(ids)
 
         market_open = is_market_hours()
         poll_minutes = MARKET_HOURS_POLL_MINUTES if market_open else AFTER_HOURS_POLL_MINUTES
+        planned_sleep = poll_minutes * 60
+
+        # Precise 9:30am ET wake for queued off-hours trades, independent of
+        # the regular 15/60-min poll cadence above (which is not reliably
+        # going to land exactly on market open). If the next open falls
+        # inside the sleep we were about to take, cut that sleep short,
+        # fill due pending trades right at open, then let the loop's next
+        # iteration (already market-hours by then) resume normal polling —
+        # this never changes the poll_minutes computed above, it only adds
+        # one extra precisely-timed wake.
+        seconds_to_open = (next_market_open() - datetime.now(MARKET_TZ)).total_seconds()
+        if 0 < seconds_to_open <= planned_sleep:
+            logger.info("Sleeping %d sec until 9:30am ET market open", int(seconds_to_open))
+            await asyncio.sleep(seconds_to_open)
+            await _fill_pending_trades()
+            continue
+
         logger.info(
             "Sleeping %d min (%s)",
             poll_minutes,
             "market hours" if market_open else "after-hours/weekend",
         )
-        await asyncio.sleep(poll_minutes * 60)
+        await asyncio.sleep(planned_sleep)
 
 
 def _main() -> None:

@@ -15,6 +15,12 @@ execute_trade()/record_trade_fill() path the HTTP /trading/trade endpoint
 uses, just called in-process instead of over HTTP (there's no browser
 session/auth token in a scheduled background run).
 
+A stock buy/sell decided outside NYSE hours (agent/market_hours.py) queues
+instead of filling immediately (_queue() / queue_pending_trade()) — see
+fill_due_pending_trades(), called by run_agent.py's precise 9:30am ET wake
+once the next trading day opens. Crypto is unaffected (24/7, always
+executes immediately via _execute()).
+
 Run once, for one portfolio:
 
     cd backend && python -m agent.decision_loop <portfolio_id>
@@ -28,6 +34,7 @@ portfolios, one per risk tier:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
@@ -35,6 +42,7 @@ from datetime import datetime, time as dtime
 from sqlalchemy.orm import Session
 
 from agent import news_ingestion, sentiment
+from agent.market_hours import is_market_hours, next_market_open
 from agent.news_ingestion import NewsArticle, SeenArticleStore
 from agent.sentiment import ScoreResult
 from app.database import SessionLocal
@@ -44,9 +52,13 @@ from app.services.agent_decision_service import create_agent_decision
 from app.services.portfolio_service import (
     InsufficientFundsError,
     InsufficientHoldingsError,
+    fill_pending_trade,
+    queue_pending_trade,
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
+
+logger = logging.getLogger(__name__)
 
 # Maps User.risk_tolerance ("low" | "medium" | "high", set during
 # onboarding) onto the three news_ingestion.TARGET_PORTFOLIOS buckets.
@@ -245,6 +257,91 @@ async def _execute(
     )
 
 
+async def _queue(
+    db: Session,
+    portfolio: Portfolio,
+    ticker: str,
+    side: str,
+    profile: dict[str, float | int],
+) -> Trade:
+    """Off-hours counterpart to _execute(): a stock buy/sell decided
+    outside NYSE hours queues instead of filling at Yahoo's stale
+    after-hours regularMarketPrice. Same sizing math as _execute() — a buy
+    still needs *some* current quote to size the dollar amount into a
+    share quantity, so this fetches one purely as an indicative price; the
+    actual fill later (fill_due_pending_trades(), at the real market-open
+    quote) is what actually charges cash/holdings, so a few hours of price
+    drift between sizing and fill is the only effect, same as a real
+    broker's market-on-open order. Sells don't need a price at all — sized
+    off the existing holding quantity, same as _execute()."""
+    asset_type = _asset_type_for(ticker)
+    if side == "buy":
+        indicative_price = await market_data.get_price_for_holding(ticker, asset_type)
+        if indicative_price is None:
+            raise ValueError(f"No indicative price available for {ticker}")
+        dollar_amount = portfolio.cash_balance * profile["position_size_pct"]
+        quantity = round(dollar_amount / indicative_price, 6)
+    else:  # sell
+        holding = next(
+            h for h in portfolio.holdings if h.symbol == ticker and h.asset_type == asset_type
+        )
+        quantity = round(holding.quantity * profile["position_size_pct"], 6)
+
+    if quantity <= 0:
+        raise ValueError(f"Computed {side} quantity for {ticker} was zero.")
+
+    return queue_pending_trade(
+        db, portfolio, ticker, asset_type, side, quantity, next_market_open(), source="agent"
+    )
+
+
+async def fill_due_pending_trades(db: Session) -> int:
+    """Fills every pending Trade whose scheduled_execution_time has
+    arrived — called by run_agent.py's precise 9:30am ET wake (and, as a
+    catch-up safety net, at the top of every regular poll cycle too, see
+    run_agent.run_forever()). Fetches a fresh price the same way a normal
+    decision would and settles cash/holdings through
+    portfolio_service.fill_pending_trade() — a pending row has had zero
+    cash/holdings effect until this point (see queue_pending_trade()'s
+    docstring). Never lets one trade's failure (missing portfolio, no
+    price yet, insufficient funds/holdings by fill time) block the rest —
+    it's left "pending" for the next run to retry."""
+    now = datetime.utcnow()
+    due = (
+        db.query(Trade)
+        .filter(Trade.status == "pending", Trade.scheduled_execution_time <= now)
+        .all()
+    )
+    filled = 0
+    for trade in due:
+        portfolio = db.query(Portfolio).filter(Portfolio.id == trade.portfolio_id).one_or_none()
+        if portfolio is None:
+            logger.error(
+                "Pending trade %s references missing portfolio %s", trade.id, trade.portfolio_id
+            )
+            continue
+
+        price = await market_data.get_price_for_holding(trade.symbol, trade.asset_type)
+        if price is None:
+            logger.error(
+                "No price available yet for pending trade %s (%s) — left pending for retry",
+                trade.id, trade.symbol,
+            )
+            continue
+
+        try:
+            fill_pending_trade(db, portfolio, trade, price)
+            filled += 1
+            logger.info(
+                "Filled pending trade %s: %s %s %s @ $%.2f",
+                trade.id, trade.side, trade.quantity, trade.symbol, price,
+            )
+        except (InsufficientFundsError, InsufficientHoldingsError) as e:
+            logger.error("Pending trade %s failed to fill: %s — left pending for retry", trade.id, e)
+
+    return filled
+
+
 async def run_once(portfolio_id: int) -> RunSummary:
     """Run one full decision cycle for a single portfolio: fetch news for
     its risk tier's tickers, score it, decide buy/sell/hold per ticker, and
@@ -316,8 +413,19 @@ async def run_once(portfolio_id: int) -> RunSummary:
 
                 trade: Trade | None = None
                 if decision in ("buy", "sell"):
+                    off_hours_stock = (
+                        _asset_type_for(ticker) == "stock" and not is_market_hours()
+                    )
                     try:
-                        trade = await _execute(db, portfolio, ticker, decision, profile)
+                        if off_hours_stock:
+                            trade = await _queue(db, portfolio, ticker, decision, profile)
+                            note = (
+                                f"{note} Off-hours: queued for next market open (9:30am ET)."
+                                if note
+                                else "Off-hours: queued for next market open (9:30am ET)."
+                            )
+                        else:
+                            trade = await _execute(db, portfolio, ticker, decision, profile)
                         trades_today += 1
                         trades_executed += 1
                     except (

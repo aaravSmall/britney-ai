@@ -301,8 +301,16 @@ class _TradeTile extends StatelessWidget {
     final side = trade['side'] as String;
     final source = trade['source'] as String;
     final quantity = (trade['quantity'] as num).toDouble();
-    final price = (trade['price'] as num).toDouble();
+    final status = trade['status'] as String? ?? 'filled';
+    final isPending = status == 'pending';
+    // price is null for a pending (queued off-hours) trade — see
+    // TradeOut's docstring — so this must stay nullable rather than the
+    // unconditional `as num` cast used everywhere else in this file.
+    final price = (trade['price'] as num?)?.toDouble();
     final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
+    final scheduledFor = trade['scheduled_execution_time'] != null
+        ? DateTime.parse(trade['scheduled_execution_time'] as String).toLocal()
+        : null;
     final isAgent = source == 'agent';
 
     final buy = side == 'buy';
@@ -329,17 +337,23 @@ class _TradeTile extends StatelessWidget {
           ],
         ),
         subtitle: Text(
-          '$qtyLabel $assetType @ \$${price.toStringAsFixed(2)} · ${formatTradeTime(timestamp, use24Hour)}',
+          isPending
+              ? '$qtyLabel $assetType · Queued for '
+                  '${scheduledFor != null ? formatTradeTime(scheduledFor, use24Hour) : '9:30 AM ET open'}'
+              : '$qtyLabel $assetType @ \$${price!.toStringAsFixed(2)} · ${formatTradeTime(timestamp, use24Hour)}',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            Text(
-              '\$${(quantity * price).toStringAsFixed(2)}',
-              style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
-            ),
+            if (isPending)
+              const _PendingBadge()
+            else
+              Text(
+                '\$${(quantity * price!).toStringAsFixed(2)}',
+                style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+              ),
             const SizedBox(height: 6),
             Row(
               mainAxisSize: MainAxisSize.min,
@@ -364,6 +378,39 @@ class _TradeTile extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Stands in for the fill amount ($qty * price) on a queued off-hours
+/// trade — there's no real fill price to show yet, so this shows status
+/// instead, in trailing's same slot.
+class _PendingBadge extends StatelessWidget {
+  const _PendingBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppTheme.textSecondaryOf(context).withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.schedule_rounded, size: 11, color: AppTheme.textSecondaryOf(context)),
+          const SizedBox(width: 3),
+          Text(
+            'PENDING',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.textSecondaryOf(context),
+            ),
+          ),
+        ],
       ),
     );
   }

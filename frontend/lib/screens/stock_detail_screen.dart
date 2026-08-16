@@ -998,7 +998,12 @@ class _RecentTradeRow extends StatelessWidget {
     final buy = side == 'buy';
     final sideColor = buy ? AppTheme.accent : AppTheme.danger;
     final qty = (trade['quantity'] as num).toDouble();
-    final price = (trade['price'] as num).toDouble();
+    final status = trade['status'] as String? ?? 'filled';
+    final isPending = status == 'pending';
+    // Null for a pending (queued off-hours) trade — see TradeOut's
+    // docstring — same nullable handling as trade_history_screen.dart's
+    // _TradeTile.
+    final price = (trade['price'] as num?)?.toDouble();
     final source = trade['source'] as String;
     final isAgent = source == 'agent';
     final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
@@ -1029,20 +1034,25 @@ class _RecentTradeRow extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${formatQuantity(qty)} @ \$${price.toStringAsFixed(2)}',
+                  isPending
+                      ? '${formatQuantity(qty)} · Queued for open'
+                      : '${formatQuantity(qty)} @ \$${price!.toStringAsFixed(2)}',
                   style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
                 ),
                 Text(
-                  '${formatTradeTime(timestamp, use24Hour)} · ${source == 'agent' ? 'Agent' : 'You'}',
+                  isPending
+                      ? 'Pending · ${source == 'agent' ? 'Agent' : 'You'}'
+                      : '${formatTradeTime(timestamp, use24Hour)} · ${source == 'agent' ? 'Agent' : 'You'}',
                   style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
               ],
             ),
           ),
-          Text(
-            '\$${(qty * price).toStringAsFixed(2)}',
-            style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
+          if (!isPending)
+            Text(
+              '\$${(qty * price!).toStringAsFixed(2)}',
+              style: t.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
           if (isAgent) ...[
             const SizedBox(width: 6),
             InkWell(

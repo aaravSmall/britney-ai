@@ -31,6 +31,15 @@ class Trade(Base):
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True
     )
+    # Set only for a queued off-hours stock trade (status="pending") — the
+    # next NYSE 9:30am ET open it's due to fill at (agent/market_hours.py's
+    # next_market_open()). Null for every immediately-filled trade (the
+    # overwhelming majority: all crypto, all during-hours stock, every user
+    # trade). See app.services.portfolio_service.queue_pending_trade/
+    # fill_pending_trade.
+    scheduled_execution_time: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
 
     portfolio = relationship("Portfolio", back_populates="trades")
     agent_decision = relationship(

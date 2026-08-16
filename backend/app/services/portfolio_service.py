@@ -30,6 +30,70 @@ def get_or_create_portfolio(db: Session, user: User) -> Portfolio:
     return portfolio
 
 
+def _settle_fill(db: Session, portfolio: Portfolio, trade: Trade, price: float) -> None:
+    """Cash/holdings/ledger mutation for one fill — the one place that
+    happens, shared by record_trade_fill (new trade, filled immediately)
+    and fill_pending_trade (an existing queued Trade row, filled later at
+    the actual market-open price). Mutates `trade.price`/`trade.status` in
+    place rather than creating a row — the caller owns creating/looking up
+    `trade` and committing."""
+    holding = next(
+        (
+            h
+            for h in portfolio.holdings
+            if h.symbol == trade.symbol and h.asset_type == trade.asset_type
+        ),
+        None,
+    )
+    cost = trade.quantity * price
+
+    if trade.side == "buy" and portfolio.cash_balance < cost:
+        raise InsufficientFundsError(
+            f"Insufficient cash: need ${cost:,.2f}, have ${portfolio.cash_balance:,.2f}"
+        )
+    if trade.side == "sell" and (not holding or holding.quantity < trade.quantity):
+        have = holding.quantity if holding else 0.0
+        raise InsufficientHoldingsError(
+            f"Insufficient {trade.symbol}: trying to sell {trade.quantity}, hold {have}"
+        )
+
+    trade.price = price
+    trade.status = "filled"
+
+    apply_cash_delta(
+        db,
+        portfolio,
+        -cost if trade.side == "buy" else cost,
+        "trade",
+        trade_id=trade.id,
+        note=f"{trade.side.upper()} {trade.quantity} {trade.symbol} @ ${price:,.2f}",
+    )
+
+    if trade.side == "buy":
+        if holding:
+            new_qty = holding.quantity + trade.quantity
+            holding.avg_cost = (
+                holding.avg_cost * holding.quantity + cost
+            ) / new_qty
+            holding.quantity = new_qty
+            holding.last_price = price
+        else:
+            holding = PortfolioHolding(
+                portfolio_id=portfolio.id,
+                symbol=trade.symbol,
+                asset_type=trade.asset_type,
+                quantity=trade.quantity,
+                avg_cost=price,
+                last_price=price,
+            )
+            db.add(holding)
+    else:  # sell
+        holding.quantity -= trade.quantity
+        holding.last_price = price
+        if holding.quantity <= 1e-9:
+            db.delete(holding)
+
+
 def record_trade_fill(
     db: Session,
     portfolio: Portfolio,
@@ -50,26 +114,6 @@ def record_trade_fill(
     works identically whether the caller is an authenticated HTTP request
     or an unattended agent loop. `source` distinguishes user-initiated
     fills from the autonomous agent's."""
-    holding = next(
-        (
-            h
-            for h in portfolio.holdings
-            if h.symbol == symbol and h.asset_type == asset_type
-        ),
-        None,
-    )
-    cost = quantity * price
-
-    if side == "buy" and portfolio.cash_balance < cost:
-        raise InsufficientFundsError(
-            f"Insufficient cash: need ${cost:,.2f}, have ${portfolio.cash_balance:,.2f}"
-        )
-    if side == "sell" and (not holding or holding.quantity < quantity):
-        have = holding.quantity if holding else 0.0
-        raise InsufficientHoldingsError(
-            f"Insufficient {symbol}: trying to sell {quantity}, hold {have}"
-        )
-
     trade = Trade(
         portfolio_id=portfolio.id,
         symbol=symbol,
@@ -85,39 +129,68 @@ def record_trade_fill(
     db.add(trade)
     db.flush()  # assigns trade.id, needed below by the cash ledger entry
 
-    apply_cash_delta(
-        db,
-        portfolio,
-        -cost if side == "buy" else cost,
-        "trade",
-        trade_id=trade.id,
-        note=f"{side.upper()} {quantity} {symbol} @ ${price:,.2f}",
+    _settle_fill(db, portfolio, trade, price)
+
+    db.commit()
+    db.refresh(portfolio)
+    db.refresh(trade)
+    return trade
+
+
+def queue_pending_trade(
+    db: Session,
+    portfolio: Portfolio,
+    symbol: str,
+    asset_type: str,
+    side: str,
+    quantity: float,
+    scheduled_execution_time: datetime,
+    *,
+    source: str = "agent",
+) -> Trade:
+    """Writes a queued off-hours stock Trade — no cash/holdings/ledger
+    effect at all until fill_pending_trade() actually settles it at the
+    real market-open price. `price` is stored as a 0.0 placeholder (Trade.
+    price is NOT NULL at the DB level in both SQLite and Postgres, and
+    bootstrap_schema()'s additive-only ALTER TABLE ADD COLUMN can't safely
+    relax that across both dialects) — callers must never read a
+    status="pending" row's price as real; the API layer
+    (schemas/trading.py's TradeOut) nulls it out for exactly this reason.
+    """
+    trade = Trade(
+        portfolio_id=portfolio.id,
+        symbol=symbol,
+        asset_type=asset_type,
+        side=side,
+        quantity=quantity,
+        price=0.0,
+        status="pending",
+        simulated=True,
+        source=source,
+        order_id=None,
+        scheduled_execution_time=scheduled_execution_time,
     )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+    return trade
 
-    if side == "buy":
-        if holding:
-            new_qty = holding.quantity + quantity
-            holding.avg_cost = (
-                holding.avg_cost * holding.quantity + cost
-            ) / new_qty
-            holding.quantity = new_qty
-            holding.last_price = price
-        else:
-            holding = PortfolioHolding(
-                portfolio_id=portfolio.id,
-                symbol=symbol,
-                asset_type=asset_type,
-                quantity=quantity,
-                avg_cost=price,
-                last_price=price,
-            )
-            db.add(holding)
-    else:  # sell
-        holding.quantity -= quantity
-        holding.last_price = price
-        if holding.quantity <= 1e-9:
-            db.delete(holding)
 
+def fill_pending_trade(db: Session, portfolio: Portfolio, trade: Trade, price: float) -> Trade:
+    """Settles a previously-queued pending Trade at `price` (the actual
+    market-open quote) — mutates the existing row in place (price/status,
+    and timestamp to the real fill moment) instead of creating a new one.
+    First cash/holdings effect this trade has ever had; raises
+    InsufficientFundsError/InsufficientHoldingsError same as
+    record_trade_fill if the portfolio can no longer afford/hold it by
+    the time it fills, leaving the row untouched (still "pending") for the
+    caller to log and retry later rather than silently dropping it. Sets
+    trade.timestamp only after _settle_fill succeeds — if it raises, the
+    row (and its timestamp) stay exactly as queued, since this trade and
+    any other pending trade being filled in the same batch share one DB
+    session/transaction (see agent.decision_loop.fill_due_pending_trades)."""
+    _settle_fill(db, portfolio, trade, price)
+    trade.timestamp = datetime.utcnow()
     db.commit()
     db.refresh(portfolio)
     db.refresh(trade)
