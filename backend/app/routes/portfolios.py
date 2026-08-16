@@ -205,8 +205,14 @@ def get_trade_history(
     ),
     source: str | None = Query(
         None,
-        pattern="^(user|agent)$",
-        description='Filter by fill source: "user" or "agent". Omit for both.',
+        pattern="^(user|agent|auto_invest|rebalance)$",
+        description=(
+            'Filter by fill source: "user", "agent", "auto_invest", or '
+            '"rebalance". Omit for all. Was missing auto_invest/rebalance '
+            "until a real rebalance query 422'd against this pattern — see "
+            "Trade.source's comment (app/models/trade.py) for the full "
+            "value set this must stay in sync with."
+        ),
     ),
     limit: int = Query(50, gt=0, le=500, description="Max rows to return."),
     offset: int = Query(0, ge=0, description="Rows to skip, for pagination."),
