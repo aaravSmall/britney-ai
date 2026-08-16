@@ -36,10 +36,15 @@ logger = logging.getLogger(__name__)
 
 # Guards against writing a duplicate snapshot if run_agent.py restarts
 # mid-cycle (e.g. process killed right after a snapshot commits but before
-# the next sleep). Set comfortably under the shortest poll interval
-# (MARKET_HOURS_POLL_MINUTES=15 in run_agent.py) so a legitimate
-# next-cycle snapshot is never mistaken for a duplicate of the previous one.
-DEDUPE_WINDOW_MINUTES = 10
+# the next sleep). Set comfortably under the poll interval
+# (POLL_MINUTES=3 in run_agent.py, flat 24/7 as of the cadence change) so
+# a legitimate next-cycle snapshot is never mistaken for a duplicate of
+# the previous one — same ~2/3 ratio as the original 10-under-15 pairing
+# this replaced; that 10 stopped being "comfortably under" once the poll
+# interval dropped to 3 without this changing too, and was observed
+# silently swallowing most real snapshots as a result (every cycle inside
+# the same 10-minute window after the first, not just genuine restarts).
+DEDUPE_WINDOW_MINUTES = 2
 
 
 def _recent_snapshot_exists(db: Session, portfolio_id: int, window_minutes: int) -> bool:
