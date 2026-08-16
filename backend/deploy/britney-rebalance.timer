@@ -1,0 +1,20 @@
+[Unit]
+Description=Run britney-rebalance.service daily at 10:00am ET (weekdays)
+
+[Timer]
+# 10:00 America/New_York (not UTC) — matches agent/market_hours.py's
+# REBALANCE_TIME exactly, and tracks EST/EDT automatically so this never
+# needs touching for daylight saving. Mon-Fri only, matching every other
+# weekday-only assumption already in this codebase (is_market_hours(),
+# next_market_open()/next_rebalance_time()) — no holiday calendar, same
+# accepted MVP scope as those.
+OnCalendar=Mon..Fri *-*-* 10:00:00 America/New_York
+# If the droplet was down at 10:00am (reboot, deploy), run the missed
+# cycle as soon as the timer is next active instead of silently skipping
+# that day — matches run_rebalance.py's own plan_rebalance() being safe
+# to run late (it computes shortfall off live prices at whatever moment
+# it actually runs, not a fixed one).
+Persistent=true
+
+[Install]
+WantedBy=timers.target

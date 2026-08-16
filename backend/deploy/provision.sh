@@ -108,13 +108,19 @@ bootstrap_schema()
 print(\"    Schema OK.\")
 '"
 
-echo "==> Installing the systemd service"
+echo "==> Installing the systemd service + rebalance timer"
 cp "${APP_DIR}/backend/deploy/britney-agent.service" /etc/systemd/system/britney-agent.service
+cp "${APP_DIR}/backend/deploy/britney-rebalance.service" /etc/systemd/system/britney-rebalance.service
+cp "${APP_DIR}/backend/deploy/britney-rebalance.timer" /etc/systemd/system/britney-rebalance.timer
 systemctl daemon-reload
 systemctl enable britney-agent
+systemctl enable --now britney-rebalance.timer
 
 echo ""
 echo "==> Done."
 echo "    1. Review/edit ${ENV_FILE}"
-echo "    2. Start the agent:  systemctl start britney-agent"
-echo "    3. Watch it run:     journalctl -u britney-agent -f"
+echo "    2. Start the agent:      systemctl start britney-agent"
+echo "    3. Watch it run:         journalctl -u britney-agent -f"
+echo "    4. Rebalance timer is enabled + started — daily 10am ET, weekdays."
+echo "       Check it:             systemctl status britney-rebalance.timer"
+echo "       Run it manually now:  systemctl start britney-rebalance.service"

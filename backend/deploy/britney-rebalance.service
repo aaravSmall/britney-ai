@@ -1,0 +1,22 @@
+[Unit]
+Description=britney.ai daily target-allocation rebalance job
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+# oneshot, not simple/Restart=always like britney-agent.service — this
+# runs one cycle (--once) and exits; britney-rebalance.timer is what
+# fires it daily, not an in-process sleep loop.
+Type=oneshot
+User=britney
+Group=britney
+WorkingDirectory=/opt/britney-ai/backend
+EnvironmentFile=/opt/britney-ai/backend/.env
+ExecStart=/opt/britney-ai/backend/.venv/bin/python -m agent.run_rebalance --once
+
+# Same sandboxing profile as britney-agent.service — network plus its own
+# working dir + Postgres over localhost, nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/britney-ai

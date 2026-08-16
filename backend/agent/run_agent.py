@@ -2,16 +2,16 @@
 Scheduler entrypoint for the britney.ai trading agent.
 
 Loops agent.decision_loop.run_once() over the agent's target portfolios
-(or explicit portfolio ids), polling more often during US stock market
-hours and less often outside them. After each portfolio's decision run —
-whether or not it traded — also calls agent.snapshot.snapshot_capture()
-for that portfolio, so PortfolioSnapshot history tracks the same cadence.
+(or explicit portfolio ids), on a flat interval, 24/7 — see POLL_MINUTES
+below for why 3 minutes and why market hours no longer change it. After
+each portfolio's decision run — whether or not it traded — also calls
+agent.snapshot.snapshot_capture() for that portfolio, so PortfolioSnapshot
+history tracks the same cadence.
 
-Market-hours check is intentionally simple — weekday + 9:30-16:00 ET, no
-holiday calendar yet — and stock-market-only, matching decision_loop's
-current stock-only scope (crypto is out of scope until the plan in
-docs/IDEAS.txt's "AGENT — CRYPTO NEWS" section is built; crypto trades
-24/7 so it would need its own cadence, not this one).
+is_market_hours() (agent/market_hours.py) still gates whether a stock
+decision executes immediately or queues (agent/decision_loop.py) — that's
+unchanged. It's no longer used here to choose the poll interval, only for
+this file's own log line.
 
     cd backend && python -m agent.run_agent            # default: the 3 agent portfolios
     cd backend && python -m agent.run_agent 1 2 3       # explicit portfolio ids
@@ -56,8 +56,25 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
-MARKET_HOURS_POLL_MINUTES = 15
-AFTER_HOURS_POLL_MINUTES = 60
+# Flat 24/7 interval, replacing the old 15-min-market-hours/60-min-
+# after-hours split. Picked 3 minutes rather than the extremes of the
+# 2-5 min range the investigation into this called for:
+#   - Rate limit isn't the constraint: a full sweep is 6 Finnhub calls
+#     across 3 portfolios (2 stock tickers each), so even at 3-min cadence
+#     that's ~2 calls/min average — over an order of magnitude under
+#     Finnhub's free-tier ~60/min ceiling (see news_ingestion.py's
+#     DEFAULT_CALLS_PER_MINUTE comment). CryptoPanic calls stay at zero
+#     real network cost regardless of cadence: with no CRYPTOPANIC_API_KEY
+#     configured, fetch_crypto_news() returns mock articles synchronously,
+#     no HTTP call at all (see news_ingestion.py's fetch_crypto_news()).
+#   - 1 minute or faster buys nothing: market_data.py's price cache
+#     (TTL_SECONDS = 60) means polling faster than that just re-serves the
+#     same cached Yahoo quote instead of a fresher one.
+#   - Yahoo's unofficial stock-quote endpoint (market_data.py) is
+#     undocumented/unofficial, unlike Finnhub's official free tier — 3 min
+#     is meaningfully faster (5-20x) than the old 15/60 split without
+#     hammering an endpoint that could rate-limit or block without notice.
+POLL_MINUTES = 3
 
 
 async def _run_all(portfolio_ids: list[int]) -> None:
@@ -121,18 +138,22 @@ async def run_forever(portfolio_ids: list[int] | None = None) -> None:
 
         await _run_all(ids)
 
-        market_open = is_market_hours()
-        poll_minutes = MARKET_HOURS_POLL_MINUTES if market_open else AFTER_HOURS_POLL_MINUTES
-        planned_sleep = poll_minutes * 60
+        planned_sleep = POLL_MINUTES * 60
 
         # Precise 9:30am ET wake for queued off-hours trades, independent of
-        # the regular 15/60-min poll cadence above (which is not reliably
-        # going to land exactly on market open). If the next open falls
-        # inside the sleep we were about to take, cut that sleep short,
-        # fill due pending trades right at open, then let the loop's next
-        # iteration (already market-hours by then) resume normal polling —
-        # this never changes the poll_minutes computed above, it only adds
-        # one extra precisely-timed wake.
+        # the flat poll cadence above (which isn't reliably going to land
+        # exactly on market open just by chance). If the next open falls
+        # inside the sleep we were about to take, cut that sleep short, fill
+        # due pending trades right at open, then let the loop's next
+        # iteration resume normal polling — this never changes
+        # planned_sleep, it only adds one extra precisely-timed wake.
+        # Self-limiting to at most once per day regardless of how short
+        # planned_sleep is: next_market_open() always returns a time
+        # strictly after "now", so the instant this branch fires and that
+        # instant becomes "now", the next call to next_market_open() jumps
+        # to the *next* trading day — there is no way for this condition to
+        # re-evaluate True again until then. Covered by
+        # tests/test_run_agent_schedule.py.
         seconds_to_open = (next_market_open() - datetime.now(MARKET_TZ)).total_seconds()
         if 0 < seconds_to_open <= planned_sleep:
             logger.info("Sleeping %d sec until 9:30am ET market open", int(seconds_to_open))
@@ -142,8 +163,8 @@ async def run_forever(portfolio_ids: list[int] | None = None) -> None:
 
         logger.info(
             "Sleeping %d min (%s)",
-            poll_minutes,
-            "market hours" if market_open else "after-hours/weekend",
+            POLL_MINUTES,
+            "market hours" if is_market_hours() else "after-hours/weekend",
         )
         await asyncio.sleep(planned_sleep)
 

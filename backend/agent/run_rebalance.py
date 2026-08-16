@@ -20,6 +20,13 @@ position down, so a tier that's already over target on one asset (e.g.
 from news-driven trading) just sits there — selling to rebalance is a
 separate future change.
 
+On the droplet, backend/deploy/britney-rebalance.timer is what actually
+fires this daily (systemd's own calendar scheduling, `--once` each time)
+rather than the run_forever() loop below — a timer survives a droplet
+reboot/deploy restart more simply than a process that has to stay
+resident 24/7 just to wake once a day. run_forever() (no args) still
+works standalone for local dev/testing without systemd.
+
     cd backend && python -m agent.run_rebalance             # run forever, daily 10am ET
     cd backend && python -m agent.run_rebalance --once             # one cycle now, then exit
     cd backend && python -m agent.run_rebalance --once --dry-run   # compute + log the plan, buy nothing
