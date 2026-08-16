@@ -60,9 +60,15 @@ DEFAULT_TIER = "moderate"
 MAX_ARTICLES_PER_TICKER = 5
 
 # Deterministic mock allocations per tier, in the same order as
-# TARGET_PORTFOLIOS[tier] (2 stock/ETF entries, then 1 crypto entry).
+# TARGET_PORTFOLIOS[tier] — 2 stock/ETF entries then 1 crypto entry for
+# moderate/aggressive; conservative dropped its crypto entry (BTC) so it's
+# 2 stock/ETF entries only (see agent/news_ingestion.py's TARGET_PORTFOLIOS
+# docstring — BTC's volatility undermined the "conservative" label, and
+# the new rebalance job's target weights, app/services/rebalance_service.py,
+# don't include any crypto sleeve for this tier either). Each list must
+# stay the same length as, and sum to ~100 pcts.
 MOCK_ALLOCATIONS_BY_TIER: dict[str, list[float]] = {
-    "conservative": [55.0, 30.0, 15.0],
+    "conservative": [63.0, 37.0],
     "moderate": [50.0, 35.0, 15.0],
     "aggressive": [40.0, 35.0, 25.0],
 }

@@ -26,7 +26,7 @@ class Trade(Base):
     simulated: Mapped[bool] = mapped_column(Boolean, default=True)
     source: Mapped[str] = mapped_column(
         String(16), default="user"
-    )  # user | agent | auto_invest
+    )  # user | agent | auto_invest | rebalance
     order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, index=True

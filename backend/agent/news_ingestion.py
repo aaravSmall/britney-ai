@@ -47,8 +47,17 @@ DEFAULT_CALLS_PER_MINUTE = 50
 # high). Stock/ETF tickers get news from fetch_news() (Finnhub); crypto
 # tickers get news from fetch_crypto_news() (CryptoPanic) — Finnhub's free
 # company-news endpoint only covers equities/ETFs.
+#
+# Conservative deliberately has no crypto entry (BTC was removed here) —
+# flagged by an investigation into risk-tier separation: BTC's volatility
+# is 3-4x VOO/BND's and undermined the "conservative" label, even though
+# it had never actually traded yet (CryptoPanic news was never
+# configured, so conservative's BTC signal was always a dead mock
+# article). Moderate/aggressive keep their one crypto ticker each
+# unchanged. app/services/rebalance_service.py's target weights follow
+# the same shape: no crypto sleeve for conservative.
 TARGET_PORTFOLIOS: dict[str, list[tuple[str, str]]] = {
-    "conservative": [("VOO", "stock"), ("BND", "stock"), ("BTC", "crypto")],
+    "conservative": [("VOO", "stock"), ("BND", "stock")],
     "moderate": [("SPY", "stock"), ("MSFT", "stock"), ("ETH", "crypto")],
     "aggressive": [("QQQ", "stock"), ("AAPL", "stock"), ("SOL", "crypto")],
 }
