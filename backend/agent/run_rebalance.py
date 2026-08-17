@@ -18,7 +18,17 @@ target allocation, and that module's docstring for why crypto is never
 part of this job's target math. Buy-only: this never sells an overweight
 position down, so a tier that's already over target on one asset (e.g.
 from news-driven trading) just sits there — selling to rebalance is a
-separate future change.
+separate future change. This now also applies to obvious/non-obvious
+classification: a fixed ticker that stops passing classification simply
+stops receiving new buys, it is never sold.
+
+Each cycle now also runs agent/classification.py's obvious/non-obvious
+classification ONCE (not once per tier/portfolio) before looping
+portfolios — see _run_cycle() below. This is the only place that
+classification runs; there is no separate standalone process/timer for
+it, per this feature's design (docs/DISCOVERY_DESIGN.md §3: classifying
+on a trailing-13-week/30-day basis doesn't need to be fresher than this
+job's existing once-daily cadence).
 
 On the droplet, backend/deploy/britney-rebalance.timer is what actually
 fires this daily (systemd's own calendar scheduling, `--once` each time)
@@ -39,11 +49,17 @@ import logging
 import sys
 from datetime import datetime
 
+from agent import classification
 from agent.decision_loop import RISK_TIER_BY_TOLERANCE, ensure_target_portfolios
 from agent.market_hours import MARKET_TZ, next_rebalance_time
 from app.database import SessionLocal, bootstrap_schema
 from app.models import Portfolio
-from app.services.rebalance_service import plan_rebalance, rebalance_portfolio
+from app.services import discovery_service
+from app.services.rebalance_service import (
+    REBALANCE_TARGET_WEIGHTS,
+    plan_rebalance,
+    rebalance_portfolio,
+)
 
 logger = logging.getLogger("agent.run_rebalance")
 
@@ -62,6 +78,26 @@ def _tier_for(portfolio: Portfolio) -> str | None:
 async def _run_cycle(*, dry_run: bool = False) -> None:
     db = SessionLocal()
     try:
+        # Classification runs ONCE per cycle, shared across all 3
+        # tiers/portfolios below — not once per portfolio. See
+        # agent/classification.py's module docstring for why it belongs
+        # here rather than a separate standalone process.
+        logger.info("Running obvious/non-obvious classification for this cycle...")
+        classifications = await classification.classify_all(db)
+        discovered_tickers = discovery_service.distinct_discovered_tickers(db)
+        confidence_by_ticker = discovery_service.latest_confidence_by_ticker(db)
+        routed = classification.route_non_obvious(
+            classifications,
+            discovered_tickers=discovered_tickers,
+            confidence_by_ticker=confidence_by_ticker,
+        )
+        logger.info(
+            "Classification complete: %d ticker(s) classified, routed non-obvious "
+            "counts: %s",
+            len(classifications),
+            {tier: len(cands) for tier, cands in routed.items()},
+        )
+
         portfolio_ids = list(ensure_target_portfolios(db).values())
         for portfolio_id in portfolio_ids:
             portfolio = db.query(Portfolio).filter(Portfolio.id == portfolio_id).one_or_none()
@@ -75,8 +111,26 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
                 )
                 continue
 
+            obvious_base = REBALANCE_TARGET_WEIGHTS[tier]["obvious"]
+            obvious_pass = {
+                ticker
+                for ticker in obvious_base
+                if classifications.get(ticker) is not None and classifications[ticker].is_obvious
+            }
+            failed_obvious = set(obvious_base) - obvious_pass
+            if failed_obvious:
+                logger.info(
+                    "portfolio=%s tier=%s: %s failed classification this cycle — no "
+                    "new buys for it, existing holdings untouched (buy-only)",
+                    portfolio.id, tier, ", ".join(sorted(failed_obvious)),
+                )
+            non_obvious_routed = [(c.ticker, c.confidence) for c in routed.get(tier, [])]
+
             if dry_run:
-                plan = await plan_rebalance(db, portfolio, tier)
+                plan = await plan_rebalance(
+                    db, portfolio, tier,
+                    obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed,
+                )
                 for item in plan:
                     logger.info(
                         "[DRY RUN] portfolio=%s tier=%s symbol=%s current=%.1f%% "
@@ -89,7 +143,10 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
                 continue
 
             try:
-                trades = await rebalance_portfolio(db, portfolio, tier)
+                trades = await rebalance_portfolio(
+                    db, portfolio, tier,
+                    obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed,
+                )
                 if trades:
                     logger.info(
                         "portfolio=%s tier=%s rebalanced: %s",

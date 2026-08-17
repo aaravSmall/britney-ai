@@ -68,12 +68,23 @@ MAX_SEARCH_RESULTS = 10
 # so the frontend's existing range toggle can drive this later) -> Yahoo's
 # own (range, interval) chart-endpoint params. Confirmed live for all
 # five before writing this: each returns a sane, non-empty point count.
+#
+# "13W" is not one of the frontend's chart-range buttons — it's used
+# internally by agent/classification.py's Gate A/C (trailing-13-week
+# weekly closes for the growth-consistency and volatility checks; see
+# docs/DISCOVERY_DESIGN.md §3). interval="1wk" already returns one
+# candle per week directly, so no client-side resampling is needed.
+# Left in this same public dict (rather than a private classification-
+# only constant) since it's exercised through the exact same history()
+# call/cache/route validation as every other range key, and the
+# /stocks/{ticker}/history route already accepts any RANGE_TO_YAHOO key.
 RANGE_TO_YAHOO: dict[str, tuple[str, str]] = {
     "1D": ("1d", "5m"),
     "1W": ("5d", "15m"),
     "30D": ("1mo", "1d"),
     "YTD": ("ytd", "1d"),
     "5Y": ("5y", "1wk"),
+    "13W": ("3mo", "1wk"),
 }
 
 # Same known-symbol universe market_data.py's fetch_stock_price() mocks,

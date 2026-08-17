@@ -5,6 +5,7 @@ from app.models.discovered_candidate import DiscoveredCandidate
 from app.models.favorite import Favorite
 from app.models.portfolio import Portfolio, PortfolioHolding, PortfolioSnapshot
 from app.models.risk_questionnaire import RiskQuestionnaireResponse
+from app.models.ticker_classification import TickerClassification
 from app.models.trade import Trade
 from app.models.user import User
 
@@ -20,4 +21,5 @@ __all__ = [
     "AgentDecision",
     "Favorite",
     "DiscoveredCandidate",
+    "TickerClassification",
 ]

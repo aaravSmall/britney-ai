@@ -45,6 +45,35 @@ def was_ticker_discovered_today(db: Session, ticker: str) -> bool:
     )
 
 
+def distinct_discovered_tickers(db: Session) -> set[str]:
+    """Every ticker that has ever cleared discovery's validation gates,
+    regardless of which day — the candidate pool agent/classification.py
+    classifies alongside the fixed 6 target tickers. Distinct because a
+    ticker can have multiple discovered_candidates rows (discovered on
+    different days) — classification is a per-ticker property, not a
+    per-discovery-event one."""
+    rows = db.query(DiscoveredCandidate.ticker).distinct().all()
+    return {row[0] for row in rows}
+
+
+def latest_confidence_by_ticker(db: Session) -> dict[str, float]:
+    """Each discovered ticker's confidence from its MOST RECENT discovery
+    row (not max/first) — used to rank non-obvious candidates within a
+    tier's concurrency cap (agent/classification.py's route_non_obvious()),
+    on the theory that the freshest signal is the most decision-relevant
+    one, not necessarily the strongest one it ever had."""
+    rows = (
+        db.query(DiscoveredCandidate)
+        .order_by(DiscoveredCandidate.ticker, DiscoveredCandidate.discovered_at.desc())
+        .all()
+    )
+    result: dict[str, float] = {}
+    for row in rows:
+        if row.ticker not in result:  # first row per ticker in this order == most recent
+            result[row.ticker] = row.confidence
+    return result
+
+
 def create_discovered_candidate(
     db: Session,
     *,
