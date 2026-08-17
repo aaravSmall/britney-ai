@@ -30,6 +30,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _error;
   Map<String, dynamic>? _dashboard;
   List<Map<String, dynamic>> _performance = [];
+  // Off-hours-queued orders (status="pending") for the selected
+  // portfolio — both user- and agent-sourced, see _PendingOrderTile.
+  // _pendingOrderPrices is keyed by symbol (pending orders are always
+  // asset_type="stock" — see backend/app/routes/trading.py's queuing
+  // rule — so no asset_type collision risk in that key).
+  List<Map<String, dynamic>> _pendingOrders = [];
+  Map<String, double> _pendingOrderPrices = {};
   // The caller's own portfolio, plus the agent's three risk-tier model
   // portfolios (see GET /portfolios) — populates the switcher.
   List<Map<String, dynamic>> _portfolios = [];
@@ -215,11 +222,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         api.get(mine ? '/dashboard' : '/portfolios/$id/summary'),
         api.get('/users/me'),
         api.get(mine ? '/dashboard/performance' : '/portfolios/$id/performance'),
+        api.get('/portfolios/$id/trades?status=pending&limit=200'),
       ]);
       if (!mounted) return;
       final dashRes = results[0];
       final meRes = results[1];
       final perfRes = results[2];
+      final pendingRes = results[3];
       if (dashRes.statusCode == 200) {
         setState(() => _dashboard = jsonDecode(dashRes.body) as Map<String, dynamic>);
       } else {
@@ -239,11 +248,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
       } else {
         setState(() => _performance = []);
       }
+      // Same degrade-quietly treatment as performance history — an empty
+      // or failed fetch just means the Queued Orders section doesn't show.
+      if (pendingRes.statusCode == 200) {
+        final list = jsonDecode(pendingRes.body) as List<dynamic>;
+        setState(
+          () => _pendingOrders = list.map((e) => e as Map<String, dynamic>).toList(),
+        );
+        unawaited(_loadPendingOrderPrices());
+      } else {
+        setState(() => _pendingOrders = []);
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'Network error: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  /// Current indicative price per unique symbol among _pendingOrders, for
+  /// the Queued Orders section's "how much stock + prices" display —
+  /// there's no fill price yet (that's the whole point of a queued
+  /// order), so this is the best available stand-in. Uses the public
+  /// GET /stocks/{ticker}/quote (no auth) rather than GET /trading/price
+  /// (CurrentUser-gated) since an agent portfolio's dashboard is viewable
+  /// while signed out. Every pending order is asset_type="stock" (see
+  /// app/routes/trading.py's queuing rule — crypto never queues), so this
+  /// stock-only endpoint always applies.
+  Future<void> _loadPendingOrderPrices() async {
+    final symbols = _pendingOrders.map((o) => o['symbol'] as String).toSet();
+    if (symbols.isEmpty) return;
+    final api = context.read<ApiService>();
+    final prices = <String, double>{};
+    await Future.wait(
+      symbols.map((symbol) async {
+        try {
+          final res = await api.get('/stocks/$symbol/quote');
+          if (res.statusCode == 200) {
+            final body = jsonDecode(res.body) as Map<String, dynamic>;
+            prices[symbol] = (body['price'] as num).toDouble();
+          }
+        } catch (_) {
+          // Missing price for one symbol just shows "—" for that tile —
+          // not worth surfacing as a page-level error.
+        }
+      }),
+    );
+    if (mounted) setState(() => _pendingOrderPrices = prices);
   }
 
   void _switchPortfolio(int id) {
@@ -618,6 +669,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ...holdings.map(
               (h) => _HoldingTile(h, portfolioId: dashboard['portfolio_id'] as int),
             ),
+            // Off-hours-queued orders — both user- and agent-placed, see
+            // POST /trading/trade and agent/decision_loop.py's matching
+            // rule. Hidden entirely when empty (the common case, during
+            // market hours) rather than an always-visible "0 queued"
+            // section like Holdings' "0 positions" — a queued order is a
+            // transient state worth calling out, not a steady-state one.
+            if (_pendingOrders.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Text(
+                    'Queued Orders',
+                    style: t.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '${_pendingOrders.length} queued',
+                    style: t.bodySmall?.copyWith(
+                      color: AppTheme.textSecondaryOf(context),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              ..._pendingOrders.map(
+                (o) => _PendingOrderTile(
+                  o,
+                  currentPrice: _pendingOrderPrices[o['symbol']],
+                  use24Hour: use24Hour,
+                ),
+              ),
+            ],
             const SizedBox(height: 20),
             Card(
               child: ListTile(
@@ -1046,6 +1132,113 @@ class _HoldingTile extends StatelessWidget {
           style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
         ),
         onTap: () => context.push('/stock/$sym?assetType=$assetType&portfolioId=$portfolioId'),
+      ),
+    );
+  }
+}
+
+/// One queued (status="pending") order — a buy/sell confirmed off-hours
+/// but not yet filled, from either a human (source="user") or the agent
+/// (source="agent"). Deliberately not tappable to /stock/:ticker like
+/// _HoldingTile — a queued order isn't a position yet, and its own row
+/// already carries everything about it there is to show.
+class _PendingOrderTile extends StatelessWidget {
+  const _PendingOrderTile(this.o, {required this.currentPrice, required this.use24Hour});
+
+  final Map<String, dynamic> o;
+  final double? currentPrice;
+  final bool use24Hour;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final sym = o['symbol'] as String;
+    final side = o['side'] as String;
+    final qty = (o['quantity'] as num).toDouble();
+    final source = o['source'] as String;
+    final isAgent = source == 'agent';
+    final scheduledFor = o['scheduled_execution_time'] != null
+        ? DateTime.parse(o['scheduled_execution_time'] as String).toLocal()
+        : null;
+
+    final buy = side == 'buy';
+    final sideColor = buy ? AppTheme.accent : AppTheme.danger;
+    final qtyLabel = formatQuantity(qty);
+    final estValue = currentPrice != null ? qty * currentPrice! : null;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        leading: CircleAvatar(
+          backgroundColor: sideColor.withValues(alpha: 0.15),
+          child: Icon(
+            Icons.schedule_rounded,
+            color: sideColor,
+            size: 18,
+          ),
+        ),
+        title: Row(
+          children: [
+            Text(sym, style: const TextStyle(fontWeight: FontWeight.w700)),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: sideColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                side.toUpperCase(),
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: sideColor),
+              ),
+            ),
+          ],
+        ),
+        subtitle: Text(
+          '$qtyLabel shares'
+          '${currentPrice != null ? ' · ~\$${currentPrice!.toStringAsFixed(2)} now' : ''}'
+          '${scheduledFor != null ? ' · queued for ${formatTradeTime(scheduledFor, use24Hour)}' : ''}',
+          style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
+        ),
+        trailing: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              estValue != null ? '~\$${estValue.toStringAsFixed(2)}' : '—',
+              style: t.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: AppTheme.surface2Of(context),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppTheme.borderSubtleOf(context)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isAgent ? Icons.auto_awesome_rounded : Icons.person_outline_rounded,
+                    size: 11,
+                    color: isAgent ? AppTheme.accent : AppTheme.textSecondaryOf(context),
+                  ),
+                  const SizedBox(width: 3),
+                  Text(
+                    isAgent ? 'Agent' : 'You',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.textSecondaryOf(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

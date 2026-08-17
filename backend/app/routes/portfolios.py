@@ -214,6 +214,17 @@ def get_trade_history(
             "value set this must stay in sync with."
         ),
     ),
+    status: str | None = Query(
+        None,
+        pattern="^(pending|filled)$",
+        description=(
+            'Filter by fill status: "pending" (queued off-hours, not yet '
+            'filled) or "filled". Omit for both — used by the dashboard\'s '
+            "Queued Orders section (status=pending) to fetch every pending "
+            "row regardless of where it falls in the newest-first paginated "
+            "list the unfiltered endpoint returns."
+        ),
+    ),
     limit: int = Query(50, gt=0, le=500, description="Max rows to return."),
     offset: int = Query(0, ge=0, description="Rows to skip, for pagination."),
     since: datetime | None = Query(
@@ -238,6 +249,8 @@ def get_trade_history(
         query = query.filter(Trade.symbol == symbol.upper())
     if source:
         query = query.filter(Trade.source == source)
+    if status:
+        query = query.filter(Trade.status == status)
     if since:
         query = query.filter(Trade.timestamp >= since)
     if until:

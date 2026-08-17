@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 
+from agent.market_hours import is_market_hours, next_market_open
 from app.deps import CurrentUser, DbSession
 from app.schemas.trading import PriceOut, TradeRequest, TradeResponse
 from app.services import market_data
@@ -7,6 +8,7 @@ from app.services.portfolio_service import (
     InsufficientFundsError,
     InsufficientHoldingsError,
     get_or_create_portfolio,
+    queue_pending_trade,
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
@@ -38,6 +40,37 @@ async def place_trade(
     if price is None:
         raise HTTPException(status_code=400, detail=f"No price available for {body.symbol}")
 
+    portfolio = get_or_create_portfolio(db, user)
+
+    # Off-hours stock orders queue instead of filling at a stale
+    # after-hours quote — same rule agent/decision_loop.py's news-driven
+    # trades already follow (agent/market_hours.py's is_market_hours()).
+    # Crypto is unaffected (24/7, always falls through to fill below).
+    # Unlike decision_loop's own queuing path, `quantity` here is already
+    # a concrete share count the user confirmed (not sized from a $
+    # amount against a live price), so this can queue directly without
+    # needing `price` for anything beyond the availability check above.
+    if body.asset_type == "stock" and not is_market_hours():
+        queue_pending_trade(
+            db,
+            portfolio,
+            body.symbol,
+            body.asset_type,
+            body.side,
+            body.quantity,
+            next_market_open(),
+            source="user",
+        )
+        return TradeResponse(
+            status="pending",
+            simulated=True,
+            message=(
+                f"Market is closed — queued {body.side} {body.quantity} {body.symbol}, "
+                "will fill at the next open (9:30am ET)."
+            ),
+            order_id=None,
+        )
+
     # Respect auto-invest: if off, only allow simulate
     simulate = body.simulate_only or not user.auto_invest_enabled
     result = execute_trade(
@@ -50,7 +83,6 @@ async def place_trade(
 
     if result.status == "filled":
         try:
-            portfolio = get_or_create_portfolio(db, user)
             record_trade_fill(
                 db,
                 portfolio,

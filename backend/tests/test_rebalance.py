@@ -1,12 +1,22 @@
 """Coverage for the target-allocation rebalance job
 (app/services/rebalance_service.py, agent/run_rebalance.py).
 
-Uses freshly-created, isolated owner_type="agent" Portfolio rows per
-test (via SessionLocal directly) rather than the app's 3 shared
-singleton agent portfolios (news-driven trading/other test files never
-mutate those, and this file shouldn't be the first to start doing so —
-same isolation reasoning test_cash_ledger.py's module docstring gives
-for using distinct tokens per test).
+Uses freshly-created, isolated Portfolio rows per test (via SessionLocal
+directly) rather than the app's 3 shared singleton agent portfolios
+(news-driven trading/other test files never mutate those, and this file
+shouldn't be the first to start doing so — same isolation reasoning
+test_cash_ledger.py's module docstring gives for using distinct tokens
+per test). rebalance_service's functions take a Portfolio + tier string
+directly and never read Portfolio.owner_type, so these rows deliberately
+use owner_type="user" rather than "agent" — an owner_type="agent" row
+here would satisfy agent.decision_loop.ensure_target_portfolios()'s
+`(owner_type="agent", risk_tolerance=X)` uniqueness assumption right
+alongside the 3 real ones, and multiple tests in this file creating one
+each (all defaulting to risk_tolerance="low") broke that assumption:
+GET /portfolios (in a *different* test file, running later in the same
+shared test DB) started raising MultipleResultsFound the moment more
+than one such row existed. Caught via a real cross-file failure, not
+proactively — worth remembering if this pattern is reused elsewhere.
 
 Stock price lookups go through a monkeypatched
 market_data.get_price_for_holding, same convention
@@ -44,8 +54,12 @@ def fixed_prices(monkeypatch):
 
 
 def _new_agent_portfolio(db, *, cash_balance: float, risk_tolerance: str = "low") -> Portfolio:
+    """owner_type="user" (not "agent") is deliberate — see module
+    docstring: rebalance_service never reads owner_type, but
+    ensure_target_portfolios() elsewhere does, and would collide with
+    these throwaway rows if they claimed to be real agent portfolios."""
     portfolio = Portfolio(
-        user_id=None, owner_type="agent", risk_tolerance=risk_tolerance, cash_balance=cash_balance
+        user_id=None, owner_type="user", risk_tolerance=risk_tolerance, cash_balance=cash_balance
     )
     db.add(portfolio)
     db.commit()
