@@ -1,0 +1,21 @@
+[Unit]
+Description=Run britney-discovery.service hourly
+
+[Timer]
+# Hourly, on the hour, 24/7 — decoupled from run_agent.py's 3-min
+# ticker poll on purpose (agent/agent_config.py's
+# DISCOVERY_POLL_MINUTES=60; see docs/DISCOVERY_DESIGN.md §4). Not
+# restricted to market hours: general news (and this pipeline's own
+# candidate discovery) doesn't stop outside 9:30-16:00 ET the way stock
+# execution does.
+OnCalendar=*-*-* *:00:00
+# If the droplet was down when an hourly run was due (reboot, deploy),
+# run the missed cycle as soon as the timer is next active instead of
+# silently skipping it — same reasoning as britney-rebalance.timer's
+# Persistent=true. Nothing is lost either way: fetch_general_news()'s
+# minId cursor just catches up on everything published since the last
+# successful cycle.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

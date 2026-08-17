@@ -1,6 +1,7 @@
 from app.models.agent_decision import AgentDecision
 from app.models.auto_invest import AutoInvestSchedule
 from app.models.cash_ledger import CashLedgerEntry
+from app.models.discovered_candidate import DiscoveredCandidate
 from app.models.favorite import Favorite
 from app.models.portfolio import Portfolio, PortfolioHolding, PortfolioSnapshot
 from app.models.risk_questionnaire import RiskQuestionnaireResponse
@@ -18,4 +19,5 @@ __all__ = [
     "RiskQuestionnaireResponse",
     "AgentDecision",
     "Favorite",
+    "DiscoveredCandidate",
 ]

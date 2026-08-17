@@ -108,13 +108,16 @@ bootstrap_schema()
 print(\"    Schema OK.\")
 '"
 
-echo "==> Installing the systemd service + rebalance timer"
+echo "==> Installing the systemd service + rebalance + discovery timers"
 cp "${APP_DIR}/backend/deploy/britney-agent.service" /etc/systemd/system/britney-agent.service
 cp "${APP_DIR}/backend/deploy/britney-rebalance.service" /etc/systemd/system/britney-rebalance.service
 cp "${APP_DIR}/backend/deploy/britney-rebalance.timer" /etc/systemd/system/britney-rebalance.timer
+cp "${APP_DIR}/backend/deploy/britney-discovery.service" /etc/systemd/system/britney-discovery.service
+cp "${APP_DIR}/backend/deploy/britney-discovery.timer" /etc/systemd/system/britney-discovery.timer
 systemctl daemon-reload
 systemctl enable britney-agent
 systemctl enable --now britney-rebalance.timer
+systemctl enable --now britney-discovery.timer
 
 echo ""
 echo "==> Done."
@@ -124,3 +127,6 @@ echo "    3. Watch it run:         journalctl -u britney-agent -f"
 echo "    4. Rebalance timer is enabled + started — daily 10am ET, weekdays."
 echo "       Check it:             systemctl status britney-rebalance.timer"
 echo "       Run it manually now:  systemctl start britney-rebalance.service"
+echo "    5. Discovery timer is enabled + started — hourly, 24/7."
+echo "       Check it:             systemctl status britney-discovery.timer"
+echo "       Run it manually now:  systemctl start britney-discovery.service"
