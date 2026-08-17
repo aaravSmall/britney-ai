@@ -8,18 +8,35 @@ cash — see the investigation that led to this module). This tops each
 tier back up toward a fixed target weight on a schedule
 (agent/run_rebalance.py), regardless of news.
 
-Buy-only: an overweight position is never sold down here — selling to
-rebalance is out of scope for now (see run_rebalance.py's module
-docstring). This now extends to obvious/non-obvious classification too
-(see below): a ticker that stops passing classification simply stops
-receiving new buys, it is never sold. Reuses the exact same
+Mostly buy-only, with two DELIBERATE, confirmed exceptions (this reverses
+the original "never sells" rule for these two cases specifically, it is
+not an inconsistency):
+
+  1. A fixed-6 ticker's confirmed (3-consecutive-day debounced) flip from
+     obvious to non-obvious sells its full position — see
+     sell_full_position() below and agent/classification.py's
+     update_streaks(), wired together in agent/run_rebalance.py's cycle.
+     Its weight then redistributes proportionally among that tier's
+     remaining passing obvious tickers (see effective_target_weights()),
+     rather than sitting as idle cash the way a merely-excluded ticker's
+     weight used to.
+  2. An emergency stop-loss (agent/stop_loss.py) sells ANY current
+     position — obvious, non-obvious, or crypto — on a sharp drop,
+     bypassing the classification debounce entirely. Tagged
+     Trade.source="stop_loss", distinct from a classification-driven
+     sell's Trade.source="rebalance", so the two are identifiable
+     separately in trade history/rationale UI.
+
+Every other overweight/underperforming position is still never sold —
+rebalancing an overweight obvious-and-passing position down, for
+instance, remains out of scope. Reuses the exact same
 execute_trade()/record_trade_fill() path decision_loop.py and
-auto_invest_service.py already use, tagged Trade.source="rebalance" so
-these fills are distinguishable in trade history and — since no
-AgentDecision row is ever created for one, unlike decision_loop's
-news-driven trades — never surface the AI trade-rationale "More info" UI
-(GET .../trades/{id}/decision 404s on trade.agent_decision being None,
-same as any other non-agent-sourced trade).
+auto_invest_service.py already use for both buys and these two sell
+paths — since no AgentDecision row is ever created for one, unlike
+decision_loop's news-driven trades, none of these ever surface the AI
+trade-rationale "More info" UI (GET .../trades/{id}/decision 404s on
+trade.agent_decision being None, same as any other non-agent-sourced
+trade).
 
 Crypto is deliberately absent from every tier's target weights: crypto
 has never actually traded (the CryptoPanic news key was never
@@ -55,6 +72,7 @@ agent_config.SPLIT_RATIOS (conservative 90/10, moderate 75/25, aggressive
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -65,10 +83,13 @@ from app.models import Portfolio, Trade
 from app.services import market_data
 from app.services.portfolio_service import (
     InsufficientFundsError,
+    InsufficientHoldingsError,
     build_portfolio_summary,
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
+
+logger = logging.getLogger(__name__)
 
 # Static base weight per fixed stock/ETF ticker, by risk tier, WITHIN
 # that tier's "obvious" bucket — see this module's docstring for why
@@ -129,15 +150,24 @@ def effective_target_weights(
     REBALANCE_TARGET_WEIGHTS[tier] plus today's classification output.
 
     obvious_pass: tickers (from REBALANCE_TARGET_WEIGHTS[tier]["obvious"])
-    that currently pass classification. A fixed ticker NOT in this set is
-    simply omitted from the returned dict — plan_rebalance()'s shortfall
-    loop then never generates a buy for it, and since this job never
-    sells (see module docstring), an existing holding in it is just left
-    untouched. Defaults to "every fixed ticker for this tier" (i.e. every
-    key already in the static "obvious" sub-dict) when None, which
-    reproduces this job's exact pre-classification behavior — the safe
-    fallback for a cycle where agent/classification.py hasn't run yet
-    (e.g. very first-ever rebalance) or wasn't passed in.
+    that currently pass classification (i.e. agent/classification.py's
+    debounced EFFECTIVE status, not the raw daily signal — see
+    update_streaks()). A fixed ticker NOT in this set is omitted from the
+    returned dict, AND its static base weight is redistributed
+    proportionally across the tickers that ARE in obvious_pass (scaled so
+    the survivors' weights still sum to the tier's FULL obvious envelope,
+    not just their own original weights) — see the code below. This
+    redistribution is what "sell it, don't just stop buying it" actually
+    means at the allocation-math level: the freed weight doesn't sit idle,
+    it goes to what's left. If obvious_pass is empty (every fixed ticker
+    for this tier currently fails), the whole envelope has nowhere to go
+    and is simply omitted — same as the non-obvious zero-candidates case
+    below, logged loudly by the caller (agent/run_rebalance.py), not
+    silently absorbed here. Defaults to "every fixed ticker for this
+    tier" (i.e. every key already in the static "obvious" sub-dict) when
+    None — trivially reproduces the original weights unchanged (nothing
+    to redistribute away from), the safe fallback for a cycle where
+    agent/classification.py hasn't run yet or wasn't passed in.
 
     non_obvious_routed: (ticker, confidence) pairs already routed to this
     tier by agent/classification.route_non_obvious() — NOT yet capped or
@@ -156,9 +186,23 @@ def effective_target_weights(
     if obvious_pass is None:
         obvious_pass = set(obvious_base)
 
-    targets: dict[str, float] = {
-        ticker: weight for ticker, weight in obvious_base.items() if ticker in obvious_pass
-    }
+    total_obvious_envelope = sum(obvious_base.values())
+    passing_base_sum = sum(weight for t, weight in obvious_base.items() if t in obvious_pass)
+
+    targets: dict[str, float] = {}
+    if passing_base_sum > 0:
+        # Proportional redistribution: survivors split the FULL envelope
+        # in their original relative proportions to each other, not just
+        # their own original weight — e.g. conservative with only VOO
+        # passing (BND excluded) gives VOO the entire 0.855 envelope, not
+        # just VOO's own original 0.540.
+        for ticker, weight in obvious_base.items():
+            if ticker in obvious_pass:
+                targets[ticker] = weight / passing_base_sum * total_obvious_envelope
+    # else: every fixed ticker for this tier currently fails — the whole
+    # envelope has nowhere to redistribute to, so it's simply omitted
+    # (left as cash). Deliberately not logged here (see docstring) — this
+    # is a pure function; the caller logs it loudly.
 
     if non_obvious_routed:
         cap = agent_config.MAX_CONCURRENT_NON_OBVIOUS[tier]
@@ -397,3 +441,87 @@ async def rebalance_portfolio(
         trades.append(trade)
 
     return trades
+
+
+async def sell_full_position(
+    db: Session,
+    portfolio: Portfolio,
+    symbol: str,
+    asset_type: str,
+    *,
+    source: str,
+) -> Trade | None:
+    """Sells the ENTIRE current holding of `symbol` in `portfolio`, if
+    any, through the standard execute_trade()/record_trade_fill() path —
+    the same path every buy in this module (and decision_loop.py,
+    auto_invest_service.py) already uses, so apply_cash_delta() and the
+    CashLedgerEntry audit trail happen automatically inside
+    record_trade_fill(), no special-casing needed here.
+
+    Shared by both of this module's deliberate sell exceptions (see
+    module docstring): agent/run_rebalance.py's classification-flip sell
+    (source="rebalance") and agent/stop_loss.py's emergency sweep
+    (source="stop_loss") — `source` is the only thing that differs
+    between the two call sites, everything else about "sell whatever is
+    currently held, in full" is identical.
+
+    Returns None (never raises) when there's nothing meaningful to sell:
+    no holding, a zero/negative quantity, or no live price available —
+    callers treat "nothing to sell" as a normal, expected outcome (e.g.
+    a classification flip fired for a ticker with no existing position),
+    not an error worth interrupting a cycle over.
+
+    Rolls back and returns None on InsufficientHoldingsError rather than
+    letting it propagate — defends against the exact shared-session
+    orphaned-Trade-row failure mode already fixed once in this module for
+    buys (see rebalance_portfolio()'s except-clause comment): both of
+    this function's callers may run several sells/buys against the same
+    shared db session within one cycle.
+    """
+    holding = next(
+        (h for h in portfolio.holdings if h.symbol == symbol and h.asset_type == asset_type),
+        None,
+    )
+    if holding is None or holding.quantity <= 0:
+        return None
+
+    price = await market_data.get_price_for_holding(symbol, asset_type)
+    if price is None:
+        logger.warning(
+            "sell_full_position: no live price available for %s (%s), skipping sell "
+            "this cycle — will retry next cycle",
+            symbol, asset_type,
+        )
+        return None
+
+    quantity = holding.quantity
+    result = execute_trade(symbol, asset_type, "sell", quantity, simulate_only=True)
+    if result.status != "filled":
+        logger.warning(
+            "sell_full_position: execute_trade did not fill for %s: %s", symbol, result.message
+        )
+        return None
+
+    try:
+        trade = record_trade_fill(
+            db,
+            portfolio,
+            symbol,
+            asset_type,
+            "sell",
+            quantity,
+            price,
+            simulated=result.simulated,
+            order_id=result.order_id,
+            source=source,
+        )
+    except InsufficientHoldingsError:
+        db.rollback()
+        logger.exception(
+            "sell_full_position: InsufficientHoldingsError selling %s — rolled back, "
+            "will retry next cycle",
+            symbol,
+        )
+        return None
+
+    return trade

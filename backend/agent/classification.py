@@ -36,13 +36,14 @@ import logging
 import math
 import statistics
 from dataclasses import dataclass
+from datetime import date, datetime
 
 import httpx
 from sqlalchemy.orm import Session
 
 from agent import agent_config, news_ingestion
 from app.config import get_settings
-from app.models import TickerClassification
+from app.models import TickerClassification, TickerStreakState
 from app.services import discovery_service, stock_data
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,16 @@ class RoutedCandidate:
     tier: str
     vol_ratio: float
     confidence: float
+
+
+@dataclass
+class StreakResult:
+    ticker: str
+    raw_status: bool
+    consecutive_days: int
+    effective_status: bool
+    previous_effective_status: bool
+    flipped: bool  # effective_status != previous_effective_status, as of THIS run
 
 
 async def _weekly_closes(ticker: str) -> tuple[list[float] | None, str]:
@@ -365,3 +376,118 @@ def route_non_obvious(
         tier_list.sort(key=lambda c: c.confidence, reverse=True)
 
     return routed
+
+
+def update_streaks(
+    db: Session,
+    classifications: dict[str, ClassificationResult],
+    *,
+    today: date | None = None,
+) -> dict[str, StreakResult]:
+    """Debounces each ticker's raw daily is_obvious result into an
+    EFFECTIVE status that only changes after
+    agent_config.CLASSIFICATION_DEBOUNCE_DAYS consecutive days of a new
+    raw value — symmetric for losing OR regaining obvious status. See
+    app/models/ticker_streak_state.py's docstring for why this is a
+    separate upserted-state table, not more columns on the append-only
+    TickerClassification history.
+
+    Algorithm per ticker, per day:
+      - today's raw == yesterday's stored raw -> consecutive_days += 1
+      - today's raw != yesterday's stored raw -> raw resets, consecutive_days = 1
+      - if consecutive_days >= DEBOUNCE_DAYS and raw != effective_status
+        -> effective_status flips to raw
+
+    Idempotent per calendar day (guards on TickerStreakState.updated_at's
+    date): calling this more than once on the same day — a manual
+    verification re-run, or a droplet restart re-firing the same day's
+    cycle — must NOT double-count that day as two consecutive days. Only
+    the first call in a given calendar day advances the streak; later
+    calls the same day just re-report the already-current state.
+
+    First-ever run for a ticker (no existing TickerStreakState row)
+    bootstraps effective_status = today's raw immediately, with
+    flipped=False by definition — there is no prior effective status to
+    have "flipped" away from, so a brand-new tracker's first reading must
+    never itself trigger a sell. This matters concretely today: several
+    of the fixed 6 are currently failing raw classification (see
+    docs/DISCOVERY_DESIGN.md's real verification runs) — bootstrapping
+    this way means they correctly start "already non-obvious" (no change
+    from their current buy-only-excluded behavior) WITHOUT retroactively
+    selling an existing position the very first time this feature runs.
+
+    `today` is injectable (defaults to real UTC today) purely so tests
+    can simulate multiple distinct days without waiting — see
+    tests/test_classification.py. The persisted updated_at is anchored to
+    this same `today` (combined with the real time-of-day, for a
+    readable timestamp) rather than always stamping the real wall-clock
+    date, so injecting different `today` values across calls fully
+    controls the idempotency check too, not just the streak math.
+    """
+    today = today or datetime.utcnow().date()
+    now = datetime.combine(today, datetime.utcnow().time())
+    results: dict[str, StreakResult] = {}
+
+    for ticker, result in classifications.items():
+        raw = result.is_obvious
+        row = db.query(TickerStreakState).filter(TickerStreakState.ticker == ticker).one_or_none()
+
+        if row is None:
+            row = TickerStreakState(
+                ticker=ticker, raw_status=raw, consecutive_days=1, effective_status=raw,
+                updated_at=now,
+            )
+            db.add(row)
+            previous_effective = raw  # bootstrap: nothing to have flipped from
+            db.flush()  # so the "already updated today" branch below reads it correctly if re-hit
+            results[ticker] = StreakResult(
+                ticker=ticker, raw_status=raw, consecutive_days=1, effective_status=raw,
+                previous_effective_status=previous_effective, flipped=False,
+            )
+            logger.info(
+                "streak %s: first-ever run (bootstrap) — raw=%s consecutive_days=1 effective=%s",
+                ticker, raw, raw,
+            )
+            continue
+        elif row.updated_at.date() == today:
+            # Already updated today — idempotent re-run, don't double-
+            # count this calendar day as an extra consecutive day.
+            results[ticker] = StreakResult(
+                ticker=ticker, raw_status=row.raw_status, consecutive_days=row.consecutive_days,
+                effective_status=row.effective_status,
+                previous_effective_status=row.effective_status, flipped=False,
+            )
+            logger.info(
+                "streak %s: already updated today (idempotent re-run) — raw=%s "
+                "consecutive_days=%d effective=%s",
+                ticker, row.raw_status, row.consecutive_days, row.effective_status,
+            )
+            continue
+        else:
+            previous_effective = row.effective_status
+            if raw == row.raw_status:
+                row.consecutive_days += 1
+            else:
+                row.raw_status = raw
+                row.consecutive_days = 1
+            if (
+                row.consecutive_days >= agent_config.CLASSIFICATION_DEBOUNCE_DAYS
+                and raw != row.effective_status
+            ):
+                row.effective_status = raw
+
+        row.updated_at = now
+        flipped = row.effective_status != previous_effective
+        results[ticker] = StreakResult(
+            ticker=ticker, raw_status=row.raw_status, consecutive_days=row.consecutive_days,
+            effective_status=row.effective_status,
+            previous_effective_status=previous_effective, flipped=flipped,
+        )
+        logger.info(
+            "streak %s: raw=%s consecutive_days=%d/%d effective=%s%s",
+            ticker, row.raw_status, row.consecutive_days, agent_config.CLASSIFICATION_DEBOUNCE_DAYS,
+            row.effective_status, " <<< FLIPPED" if flipped else "",
+        )
+
+    db.commit()
+    return results

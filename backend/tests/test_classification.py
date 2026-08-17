@@ -17,6 +17,7 @@ convention test_rebalance.py/test_pending_trades.py already use.
 """
 
 import asyncio
+from datetime import date, timedelta
 
 import httpx
 import pytest
@@ -31,7 +32,10 @@ from agent.classification import (
     _weekly_returns,
     classify_ticker,
     route_non_obvious,
+    update_streaks,
 )
+from app.database import SessionLocal
+from app.models import TickerStreakState
 
 
 # ---------------------------------------------------------------------
@@ -283,3 +287,152 @@ def test_route_non_obvious_skips_candidates_with_no_volatility_ratio():
     )
     all_routed_tickers = {c.ticker for tier_list in routed.values() for c in tier_list}
     assert all_routed_tickers == set()
+
+
+# ---------------------------------------------------------------------
+# update_streaks() — the 3-day debounce (Part A of the sell mechanisms).
+# CONSTRUCTED: real production data is at most a couple of days old for
+# this feature, so these simulate multiple distinct days via update_
+# streaks()'s injectable `today` parameter rather than waiting.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_streak_state(client):
+    """Schema bootstrap (via the unused `client` fixture, see
+    test_rebalance.py's identical convention) plus a clean slate per
+    test — TickerStreakState is a single upserted row per ticker, so
+    tests must not see each other's leftover rows for the same ticker."""
+    db = SessionLocal()
+    try:
+        db.query(TickerStreakState).delete()
+        db.commit()
+    finally:
+        db.close()
+    yield
+
+
+def _classifications(**raw_by_ticker: bool) -> dict[str, ClassificationResult]:
+    return {
+        ticker: _result(ticker, is_obvious=raw, vol_ratio=1.0)
+        for ticker, raw in raw_by_ticker.items()
+    }
+
+
+def test_update_streaks_bootstrap_never_flips_or_triggers_a_sell():
+    """First-ever run for a ticker must never itself count as a
+    'flip' — there is no prior effective status to have flipped away
+    from. Matters concretely: several real fixed-6 tickers are CURRENTLY
+    failing raw classification, and bootstrapping must not retroactively
+    sell their existing positions the moment this feature is deployed."""
+    db = SessionLocal()
+    try:
+        results = update_streaks(db, _classifications(BND=False, VOO=True), today=date(2026, 1, 1))
+    finally:
+        db.close()
+
+    assert results["BND"].effective_status is False
+    assert results["BND"].consecutive_days == 1
+    assert results["BND"].flipped is False
+
+    assert results["VOO"].effective_status is True
+    assert results["VOO"].flipped is False
+
+
+def test_update_streaks_flip_fires_on_day_three_not_one_or_two():
+    """CONSTRUCTED: obvious ticker starts passing (day 0, bootstrap),
+    then fails 3 consecutive days — the flip (and the sell it would
+    trigger in agent/run_rebalance.py) must land on day 3, not day 1
+    or day 2."""
+    ticker = "XYZ"
+    day0, day1, day2, day3 = (date(2026, 1, i) for i in (1, 2, 3, 4))
+    db = SessionLocal()
+    try:
+        r0 = update_streaks(db, _classifications(**{ticker: True}), today=day0)[ticker]
+        assert r0.effective_status is True and r0.flipped is False  # bootstrap, still obvious
+
+        r1 = update_streaks(db, _classifications(**{ticker: False}), today=day1)[ticker]
+        assert r1.consecutive_days == 1
+        assert r1.effective_status is True  # still obvious — day 1 of 3
+        assert r1.flipped is False
+
+        r2 = update_streaks(db, _classifications(**{ticker: False}), today=day2)[ticker]
+        assert r2.consecutive_days == 2
+        assert r2.effective_status is True  # still obvious — day 2 of 3
+        assert r2.flipped is False
+
+        r3 = update_streaks(db, _classifications(**{ticker: False}), today=day3)[ticker]
+        assert r3.consecutive_days == 3
+        assert r3.effective_status is False  # NOW it flips — day 3
+        assert r3.flipped is True
+    finally:
+        db.close()
+
+
+def test_update_streaks_single_day_flip_back_resets_streak_without_selling():
+    """CONSTRUCTED: 2 consecutive failing days (one short of the 3-day
+    threshold), then a single passing day — the streak must reset to 1,
+    and effective_status must have stayed obvious=True THE ENTIRE TIME
+    (it never got close enough to flip), so no sell would ever fire."""
+    ticker = "XYZ"
+    days = [date(2026, 1, i) for i in range(1, 6)]
+    db = SessionLocal()
+    try:
+        update_streaks(db, _classifications(**{ticker: True}), today=days[0])  # bootstrap
+        update_streaks(db, _classifications(**{ticker: False}), today=days[1])  # fail day 1
+        r2 = update_streaks(db, _classifications(**{ticker: False}), today=days[2])[ticker]  # fail day 2
+        assert r2.consecutive_days == 2
+        assert r2.effective_status is True  # not flipped yet
+
+        r3 = update_streaks(db, _classifications(**{ticker: True}), today=days[3])[ticker]  # back to pass
+        assert r3.raw_status is True
+        assert r3.consecutive_days == 1  # reset, not 3
+        assert r3.effective_status is True  # was never touched
+        assert r3.flipped is False  # nothing to flip — it never left True
+    finally:
+        db.close()
+
+
+def test_update_streaks_regaining_obvious_status_needs_three_days_too():
+    """Symmetric to the losing-obvious-status case: a ticker that starts
+    non-obvious (bootstrap) only regains effective obvious status after
+    3 consecutive passing days."""
+    ticker = "XYZ"
+    days = [date(2026, 1, i) for i in range(1, 5)]
+    db = SessionLocal()
+    try:
+        r0 = update_streaks(db, _classifications(**{ticker: False}), today=days[0])[ticker]
+        assert r0.effective_status is False  # bootstrap non-obvious
+
+        r1 = update_streaks(db, _classifications(**{ticker: True}), today=days[1])[ticker]
+        assert r1.consecutive_days == 1 and r1.effective_status is False
+
+        r2 = update_streaks(db, _classifications(**{ticker: True}), today=days[2])[ticker]
+        assert r2.consecutive_days == 2 and r2.effective_status is False
+
+        r3 = update_streaks(db, _classifications(**{ticker: True}), today=days[3])[ticker]
+        assert r3.consecutive_days == 3
+        assert r3.effective_status is True  # regained, on day 3
+        assert r3.flipped is True
+    finally:
+        db.close()
+
+
+def test_update_streaks_same_day_rerun_is_idempotent_not_double_counted():
+    """A manual re-run (or a droplet catching up the same calendar day)
+    must not advance the streak twice for one calendar day."""
+    ticker = "XYZ"
+    today = date(2026, 1, 1)
+    db = SessionLocal()
+    try:
+        update_streaks(db, _classifications(**{ticker: True}), today=today)  # bootstrap
+        r1 = update_streaks(db, _classifications(**{ticker: False}), today=today + timedelta(days=1))[ticker]
+        assert r1.consecutive_days == 1
+
+        r1_again = update_streaks(
+            db, _classifications(**{ticker: False}), today=today + timedelta(days=1)
+        )[ticker]
+        assert r1_again.consecutive_days == 1  # NOT 2 — same calendar day, not double-counted
+        assert r1_again.flipped is False
+    finally:
+        db.close()

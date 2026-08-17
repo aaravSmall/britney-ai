@@ -90,15 +90,28 @@ def test_effective_target_weights_defaults_reproduce_pre_classification_behavior
     assert targets == {"VOO": pytest.approx(0.540), "BND": pytest.approx(0.315)}
 
 
-def test_effective_target_weights_excludes_a_ticker_that_fails_classification():
-    """A fixed ticker not in obvious_pass is omitted entirely from the
-    flat targets dict — the mechanism behind buy-only/no-forced-sell:
-    plan_rebalance()'s shortfall loop never even considers it."""
+def test_effective_target_weights_redistributes_excluded_tickers_weight():
+    """A fixed ticker not in obvious_pass is omitted from the flat
+    targets dict, AND its static weight is redistributed to the
+    survivor(s) — VOO absorbs BND's whole share, ending up with the
+    FULL 0.855 obvious envelope, not just its own original 0.540. This
+    is the allocation-math half of "sell it, don't just stop buying it"
+    (see rebalance_service.py's module docstring) — the freed weight
+    doesn't sit idle, it goes to what's left."""
     targets = rebalance_service.effective_target_weights(
         "conservative", obvious_pass={"VOO"}  # BND excluded
     )
-    assert targets == {"VOO": pytest.approx(0.540)}
+    assert targets == {"VOO": pytest.approx(0.855)}
     assert "BND" not in targets
+
+
+def test_effective_target_weights_zero_obvious_candidates_omits_whole_envelope():
+    """If EVERY fixed ticker for a tier currently fails (a real
+    possibility — see docs on aggressive's QQQ/AAPL), the entire obvious
+    envelope has nowhere to redistribute to and is simply omitted, left
+    as cash — same treatment as the zero-non-obvious-candidates case."""
+    targets = rebalance_service.effective_target_weights("conservative", obvious_pass=set())
+    assert targets == {}
 
 
 def test_effective_target_weights_routes_and_equal_weights_non_obvious():
@@ -335,16 +348,21 @@ def test_cash_balance_matches_ledger_sum_with_rebalance_buys_in_the_mix(client, 
         db.close()
 
 
-def test_buy_only_a_ticker_that_fails_classification_gets_no_new_buy_and_is_never_sold(
+def test_rebalance_portfolio_never_sells_a_ticker_excluded_from_obvious_pass(
     client, fixed_prices
 ):
-    """The explicit design decision from this prompt: a ticker that was
-    "obvious" yesterday (has an existing holding) and fails classification
-    today must receive ZERO new buy activity for it AND zero sell
-    activity — the existing position just sits there untouched. Constructs
-    this by passing obvious_pass excluding BND (simulating "BND failed
-    classification this cycle") on a portfolio that already holds BND
-    from a prior cycle."""
+    """rebalance_portfolio() ITSELF never sells (unlike the module as a
+    whole — see rebalance_service.py's docstring for the two deliberate
+    sell exceptions added since this test was first written: a confirmed
+    3-day classification flip and the emergency stop-loss. Both of those
+    call sell_full_position() SEPARATELY, from agent/run_rebalance.py's
+    cycle and agent/stop_loss.py respectively, before/independent of
+    rebalance_portfolio() running — this function's own buy loop has no
+    sell code path at all). A ticker excluded from obvious_pass (e.g.
+    mid-debounce, not yet a confirmed flip) gets zero new buy activity
+    for it and zero sell activity from THIS function — the existing
+    position just sits there untouched. Constructs this by passing
+    obvious_pass excluding BND on a portfolio that already holds BND."""
     db = SessionLocal()
     try:
         portfolio = _new_agent_portfolio(db, cash_balance=10_000.0)
@@ -581,3 +599,88 @@ def test_insufficient_funds_error_rolls_back_and_leaves_no_orphaned_trade(client
         )
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------
+# sell_full_position() — the shared sell mechanism behind both of
+# rebalance_service.py's deliberate sell exceptions (classification-flip
+# and, from agent/stop_loss.py, emergency stop-loss).
+# ---------------------------------------------------------------------
+
+
+def test_sell_full_position_sells_the_entire_holding_with_given_source(client, fixed_prices):
+    db = SessionLocal()
+    try:
+        portfolio = _new_agent_portfolio(db, cash_balance=100.0)
+        db.add(
+            PortfolioHolding(
+                portfolio_id=portfolio.id, symbol="BND", asset_type="stock",
+                quantity=10.0, avg_cost=80.0,
+            )
+        )
+        db.commit()
+        db.refresh(portfolio)
+        portfolio_id = portfolio.id
+
+        trade = asyncio.run(
+            rebalance_service.sell_full_position(db, portfolio, "BND", "stock", source="rebalance")
+        )
+    finally:
+        db.close()
+
+    assert trade is not None
+    assert trade.symbol == "BND"
+    assert trade.side == "sell"
+    assert trade.quantity == pytest.approx(10.0)
+    assert trade.source == "rebalance"
+
+    db = SessionLocal()
+    try:
+        portfolio = db.get(Portfolio, portfolio_id)
+        holdings = {h.symbol: h for h in portfolio.holdings}
+        # A full sell removes the holding row entirely (portfolio_service's
+        # own convention for a position that hits exactly zero), not a
+        # lingering quantity=0 row.
+        assert "BND" not in holdings or holdings["BND"].quantity == pytest.approx(0.0)
+        assert portfolio.cash_balance == pytest.approx(100.0 + 10.0 * FAKE_PRICES["BND"])
+    finally:
+        db.close()
+
+
+def test_sell_full_position_returns_none_when_nothing_to_sell(client, fixed_prices):
+    db = SessionLocal()
+    try:
+        portfolio = _new_agent_portfolio(db, cash_balance=100.0)  # no holdings at all
+        trade = asyncio.run(
+            rebalance_service.sell_full_position(db, portfolio, "BND", "stock", source="rebalance")
+        )
+    finally:
+        db.close()
+
+    assert trade is None
+
+
+def test_sell_full_position_tags_stop_loss_source_distinctly(client, fixed_prices):
+    """Confirms the ONLY difference between a classification-driven sell
+    and a stop-loss sell, at this function's level, is the `source`
+    string — both go through the exact same mechanics."""
+    db = SessionLocal()
+    try:
+        portfolio = _new_agent_portfolio(db, cash_balance=100.0)
+        db.add(
+            PortfolioHolding(
+                portfolio_id=portfolio.id, symbol="VOO", asset_type="stock",
+                quantity=2.0, avg_cost=500.0,
+            )
+        )
+        db.commit()
+        db.refresh(portfolio)
+
+        trade = asyncio.run(
+            rebalance_service.sell_full_position(db, portfolio, "VOO", "stock", source="stop_loss")
+        )
+    finally:
+        db.close()
+
+    assert trade.source == "stop_loss"
+    assert trade.side == "sell"

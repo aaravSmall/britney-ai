@@ -6,6 +6,7 @@ from app.models.favorite import Favorite
 from app.models.portfolio import Portfolio, PortfolioHolding, PortfolioSnapshot
 from app.models.risk_questionnaire import RiskQuestionnaireResponse
 from app.models.ticker_classification import TickerClassification
+from app.models.ticker_streak_state import TickerStreakState
 from app.models.trade import Trade
 from app.models.user import User
 
@@ -22,4 +23,5 @@ __all__ = [
     "Favorite",
     "DiscoveredCandidate",
     "TickerClassification",
+    "TickerStreakState",
 ]

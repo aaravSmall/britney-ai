@@ -13,6 +13,16 @@ decision executes immediately or queues (agent/decision_loop.py) — that's
 unchanged. It's no longer used here to choose the poll interval, only for
 this file's own log line.
 
+Also runs agent/stop_loss.py's emergency sweep every cycle (see
+_check_stop_losses() below) — a sibling call here, NOT wired into
+decision_loop.py itself, which stays untouched. An emergency stop-loss
+that only checked once a day (alongside agent/run_rebalance.py's own
+10am ET cycle, where this also runs) would defeat its own purpose: a
+position cratering mid-morning shouldn't wait until tomorrow's cycle to
+get sold. Cheap to add here despite the 3-min cadence — see
+agent/stop_loss.py's module docstring for why its Yahoo history cache
+already absorbs most of the added call volume.
+
     cd backend && python -m agent.run_agent            # default: the 3 agent portfolios
     cd backend && python -m agent.run_agent 1 2 3       # explicit portfolio ids
 """
@@ -26,6 +36,7 @@ import sys
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+from agent import stop_loss
 from agent.decision_loop import ensure_target_portfolios, fill_due_pending_trades, run_once
 from agent.market_hours import MARKET_TZ, is_market_hours, next_market_open
 from agent.snapshot import snapshot_capture
@@ -117,6 +128,26 @@ async def _fill_pending_trades() -> None:
         db.close()
 
 
+async def _check_stop_losses() -> None:
+    """Own SessionLocal(), own try/except — a stop-loss check crashing
+    must never block or crash the rest of this cycle (decision_loop's
+    news-driven trading, snapshotting), same discipline every other step
+    in run_forever() already follows."""
+    db = SessionLocal()
+    try:
+        results = await stop_loss.check_all_positions_and_sell(db)
+        triggered = [r for r in results if r.triggered]
+        if triggered:
+            logger.warning(
+                "Stop-loss triggered for %d position(s) this cycle: %s",
+                len(triggered), [f"{r.symbol}({r.asset_type})" for r in triggered],
+            )
+    except Exception:
+        logger.exception("Stop-loss sweep crashed unexpectedly")
+    finally:
+        db.close()
+
+
 async def run_forever(portfolio_ids: list[int] | None = None) -> None:
     while True:
         ids = portfolio_ids
@@ -135,6 +166,7 @@ async def run_forever(portfolio_ids: list[int] | None = None) -> None:
         # scheduled_execution_time has actually arrived, so this is a
         # no-op on every cycle where nothing is due.
         await _fill_pending_trades()
+        await _check_stop_losses()
 
         await _run_all(ids)
 

@@ -120,3 +120,37 @@ MAX_CONCURRENT_NON_OBVIOUS: dict[str, int] = {
 # already being this app's highest-risk-budget tier.
 NON_OBVIOUS_VOL_BAND_CONSERVATIVE_MAX = 1.5  # ratio <= this -> conservative
 NON_OBVIOUS_VOL_BAND_MODERATE_MAX = 3.0  # this < ratio <= this -> moderate; above -> aggressive
+
+# --- Classification-based sell debounce (agent/classification.py) ---
+# Consecutive days a fixed-6 ticker's RAW daily classification must hold
+# a NEW value before its EFFECTIVE (allocation/sell-driving) status
+# actually flips — applies symmetrically to losing AND regaining obvious
+# status. This deliberately REVERSES the earlier "buy-only, no forced
+# sells" rule: a confirmed 3-day flip from obvious -> non-obvious now
+# sells the full position (see rebalance_service.sell_full_position()
+# and agent/classification.update_streaks()). The point of debouncing at
+# all is to avoid selling a position off one noisy day's gate result that
+# reverts tomorrow — see agent/run_agent.py/run_rebalance.py's docstrings
+# for how this interacts with the separate, non-debounced emergency
+# stop-loss below.
+CLASSIFICATION_DEBOUNCE_DAYS = 3
+
+# --- Emergency stop-loss (agent/stop_loss.py) ---
+# Independent of, and deliberately bypasses, CLASSIFICATION_DEBOUNCE_DAYS
+# entirely — an emergency exit doesn't wait 3 days to confirm anything.
+# Checked against EVERY currently-held position (fixed-6 obvious,
+# non-obvious/discovered, and crypto), not just the classification-
+# tracked fixed 6. Two independent triggers per position, whichever
+# fires first: a sharp single-day move, or a sustained cumulative drop
+# from the trailing high (see STOP_LOSS_HIGH_LOOKBACK_DAYS). Crypto gets
+# deliberately wider bands than stocks — crypto's routine day-to-day
+# volatility would false-trigger a stock-calibrated threshold constantly
+# (the same "different assets need different normal ranges" reasoning
+# Gate C already applies via VOLATILITY_MAX_VS_VOO, just with fixed
+# bands here instead of a relative ratio, since a stop-loss needs to fire
+# even on a day the whole market/VOO is also down).
+STOP_LOSS_HIGH_LOOKBACK_DAYS = 10
+STOP_LOSS_STOCK_SINGLE_DAY_PCT = -0.15
+STOP_LOSS_STOCK_DROP_FROM_HIGH_PCT = -0.20
+STOP_LOSS_CRYPTO_SINGLE_DAY_PCT = -0.30
+STOP_LOSS_CRYPTO_DROP_FROM_HIGH_PCT = -0.35
