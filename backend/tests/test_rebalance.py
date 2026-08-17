@@ -33,6 +33,7 @@ import pytest
 
 import app.services.market_data as market_data
 import app.services.rebalance_service as rebalance_service
+from agent import agent_config
 from app.database import SessionLocal
 from app.models import CashLedgerEntry, Portfolio, PortfolioHolding
 from app.services.portfolio_service import queue_pending_trade
@@ -684,3 +685,107 @@ def test_sell_full_position_tags_stop_loss_source_distinctly(client, fixed_price
 
     assert trade.source == "stop_loss"
     assert trade.side == "sell"
+
+
+# ---------------------------------------------------------------------
+# Global obvious pool — a discovered ticker that CONFIRMS obvious status
+# (agent/classification.global_obvious_pool()) is folded into EVERY
+# tier's obvious bucket, redistributed proportionally, unlike
+# non_obvious_routed which stays volatility-routed to one tier.
+# ---------------------------------------------------------------------
+
+
+def test_global_obvious_discovered_ticker_redistributes_across_all_three_tiers():
+    """CONSTRUCTED: a discovered ticker "XYZ" that has crossed the 3-day
+    threshold (see tests/test_classification.py's integration test for
+    that debounce proof) must appear in ALL THREE tiers' target weights
+    once passed as global_obvious_discovered — not volatility-routed to
+    just one, unlike a non-obvious candidate — and the fixed tickers'
+    weights must genuinely shrink to make room (real redistribution, not
+    XYZ just added on top of the existing envelope)."""
+    global_pool = {"XYZ"}
+
+    conservative_before = rebalance_service.effective_target_weights("conservative")
+    conservative_after = rebalance_service.effective_target_weights(
+        "conservative", global_obvious_discovered=global_pool
+    )
+    moderate_after = rebalance_service.effective_target_weights(
+        "moderate", global_obvious_discovered=global_pool
+    )
+    aggressive_after = rebalance_service.effective_target_weights(
+        "aggressive", global_obvious_discovered=global_pool
+    )
+
+    for tier_targets, tier in (
+        (conservative_after, "conservative"), (moderate_after, "moderate"),
+        (aggressive_after, "aggressive"),
+    ):
+        assert "XYZ" in tier_targets, f"XYZ missing from {tier}'s targets"
+        assert tier_targets["XYZ"] > 0
+        # Total envelope is conserved — XYZ's share came FROM the fixed
+        # tickers via redistribution, not bolted on top of them.
+        assert sum(tier_targets.values()) == pytest.approx(
+            sum(rebalance_service.REBALANCE_TARGET_WEIGHTS[tier]["obvious"].values())
+        )
+
+    # Real shrinkage proof, conservative specifically: VOO's weight with
+    # XYZ in the pool must be LESS than VOO's weight without it.
+    assert conservative_after["VOO"] < conservative_before["VOO"]
+    assert conservative_after["BND"] < conservative_before["BND"]
+
+    print(
+        f"\nGlobal pool redistribution — conservative: {conservative_after}\n"
+        f"moderate: {moderate_after}\naggressive: {aggressive_after}"
+    )
+
+
+def test_ticker_confirmed_obvious_frees_non_obvious_cap_slot_for_next_candidate():
+    """CONSTRUCTED: moderate's MAX_CONCURRENT_NON_OBVIOUS cap is 3. Round
+    1 has 4 routed candidates — D (lowest confidence) is cut by the cap.
+    Round 2 simulates B being CONFIRMED obvious (agent/run_rebalance.py's
+    cycle would no longer include B in route_non_obvious()'s output at
+    all once that happens — see test_classification.py's
+    test_route_non_obvious_never_routes_confirmed_obvious_tickers) — with
+    B gone from the routed list, D — previously cut by the cap — now
+    fits and gets weight. This is the cap-freeing mechanism end to end."""
+    tier = "moderate"
+    assert agent_config.MAX_CONCURRENT_NON_OBVIOUS[tier] == 3
+
+    routed_round1 = [("A", 0.9), ("B", 0.8), ("C", 0.7), ("D", 0.6)]
+    targets_round1 = rebalance_service.effective_target_weights(tier, non_obvious_routed=routed_round1)
+    assert set(targets_round1) & {"A", "B", "C", "D"} == {"A", "B", "C"}
+    assert "D" not in targets_round1  # cut by the cap — no free slot yet
+
+    # B is now confirmed obvious and gone from the routed list entirely.
+    routed_round2 = [("A", 0.9), ("C", 0.7), ("D", 0.6)]
+    targets_round2 = rebalance_service.effective_target_weights(tier, non_obvious_routed=routed_round2)
+    assert "D" in targets_round2  # D's slot was freed by B's departure
+    assert "B" not in targets_round2
+
+    print(
+        f"\nRound 1 (D cut by cap): {sorted(set(targets_round1) & {'A','B','C','D'})}\n"
+        f"Round 2 (B confirmed obvious, D fills the freed slot): "
+        f"{sorted(set(targets_round2) & {'A','B','C','D'})}"
+    )
+
+
+def test_global_pool_removal_redistributes_among_remaining_dynamic_pool():
+    """CONSTRUCTED: symmetric removal (point 4) — confirms the EXISTING
+    redistribution formula in effective_target_weights() already
+    generalizes correctly to a shrinking dynamic pool with no
+    special-casing: calling it with global_obvious_discovered={"XYZ"}
+    then with an empty set reproduces the ORIGINAL fixed-6-only weights
+    exactly, via the same code path, same as a fixed ticker's own
+    obvious_pass removal already worked before this pool existed."""
+    tier = "conservative"
+    with_xyz = rebalance_service.effective_target_weights(tier, global_obvious_discovered={"XYZ"})
+    assert "XYZ" in with_xyz
+
+    without_xyz = rebalance_service.effective_target_weights(tier, global_obvious_discovered=set())
+    assert "XYZ" not in without_xyz
+    assert without_xyz == {"VOO": pytest.approx(0.540), "BND": pytest.approx(0.315)}
+    # Same total envelope either way — XYZ's freed share fully absorbed
+    # by VOO/BND, nothing left stranded.
+    assert sum(without_xyz.values()) == pytest.approx(sum(with_xyz.values()))
+
+    print(f"\nWith XYZ: {with_xyz}\nWithout XYZ (removed, redistributed back): {without_xyz}")

@@ -29,10 +29,13 @@ bypassing the debounce entirely on a sharp drop.
 
 Each cycle now runs, in order: (1) agent/classification.py's obvious/
 non-obvious classification, ONCE (not once per tier/portfolio); (2)
-update_streaks() to debounce each fixed ticker's status and detect any
-CONFIRMED flip, executing a sell for each one found; (3)
+update_streaks() to debounce every ticker's status (fixed 6 AND
+discovered) and detect any CONFIRMED flip; (3) acting on those flips —
+obvious -> non-obvious sells the full position (from every tier that
+could hold it: just the owning tier for a fixed ticker, all 3 for a
+discovered ticker in the global obvious pool — see below); (4)
 agent/stop_loss.py's emergency sweep over every currently-held position
-(obvious, non-obvious, and crypto); (4) the normal per-portfolio buy
+(obvious, non-obvious, and crypto); (5) the normal per-portfolio buy
 loop, now reading each tier's freshly-updated obvious_pass. This is the
 only place classification/streak-debounce runs — no separate standalone
 process/timer for it (docs/DISCOVERY_DESIGN.md §3: a trailing-13-week/
@@ -40,6 +43,13 @@ process/timer for it (docs/DISCOVERY_DESIGN.md §3: a trailing-13-week/
 cadence). The stop-loss sweep, by contrast, ALSO runs every 3 minutes
 from agent/run_agent.py — see that module's docstring for why an
 "emergency" mechanism can't wait for a once-daily cycle alone.
+
+A discovered ticker that CONFIRMS obvious status (same 3-day debounce)
+joins a GLOBAL obvious pool folded into EVERY tier's obvious bucket, not
+routed to one tier like non-obvious candidates are — see
+app.services.rebalance_service.effective_target_weights()'s docstring
+for the redistribution math and why "available to any risk level" is the
+right call for a ticker that's cleared the strict volatility gate.
 
 On the droplet, backend/deploy/britney-rebalance.timer is what actually
 fires this daily (systemd's own calendar scheduling, `--once` each time)
@@ -113,31 +123,64 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
         classifications = await classification.classify_all(db)
         discovered_tickers = discovery_service.distinct_discovered_tickers(db)
         confidence_by_ticker = discovery_service.latest_confidence_by_ticker(db)
+
+        # 2. Debounce each ticker's status BEFORE routing/pool decisions
+        # below — both route_non_obvious() and global_obvious_pool() need
+        # the debounced EFFECTIVE status (not the raw daily signal), so a
+        # discovered ticker that just started passing today doesn't
+        # instantly vanish from non-obvious routing before it's actually
+        # confirmed into the global obvious pool (see
+        # classification.route_non_obvious()'s docstring point 2).
+        streaks = classification.update_streaks(db, classifications)
+
         routed = classification.route_non_obvious(
-            classifications,
+            classifications, streaks,
             discovered_tickers=discovered_tickers,
             confidence_by_ticker=confidence_by_ticker,
         )
+        global_obvious_discovered = classification.global_obvious_pool(
+            streaks, discovered_tickers=discovered_tickers
+        )
         logger.info(
             "Classification complete: %d ticker(s) classified, routed non-obvious "
-            "counts: %s",
+            "counts: %s, global obvious discovered pool: %s",
             len(classifications),
             {tier: len(cands) for tier, cands in routed.items()},
+            sorted(global_obvious_discovered) or "(none)",
         )
 
-        # 2. Debounce each ticker's status, and act on any CONFIRMED
-        # (3-consecutive-day) flip — obvious->non-obvious sells the full
-        # position (this reverses the original buy-only rule, on
-        # purpose — see rebalance_service.py's module docstring);
-        # non-obvious->obvious just re-enters obvious_pass below, no
-        # trade needed for that direction (buys happen through the
-        # normal per-tier loop like any other passing ticker).
-        streaks = classification.update_streaks(db, classifications)
-        for tier, portfolio in portfolios_by_tier.items():
-            for ticker in REBALANCE_TARGET_WEIGHTS[tier]["obvious"]:
-                streak = streaks.get(ticker)
-                if streak is None or not streak.flipped or streak.effective_status:
-                    continue  # only act on a CONFIRMED obvious -> non-obvious flip
+        # 3. Act on any CONFIRMED (3-consecutive-day) flip — obvious ->
+        # non-obvious sells the full position (this reverses the
+        # original buy-only rule, on purpose — see rebalance_service.py's
+        # module docstring); non-obvious -> obvious just re-enters
+        # obvious_pass/global_obvious_discovered below, no trade needed
+        # for that direction (buys happen through the normal per-tier
+        # loop like any other passing ticker).
+        #
+        # Fixed-6 tickers belong to exactly one tier, so only that tier's
+        # portfolio can hold one — sell from there only. A discovered
+        # ticker that was in the GLOBAL obvious pool is potentially held
+        # by all 3 tiers (unlike fixed tickers, unlike volatility-routed
+        # non-obvious candidates), so a confirmed flip out of it sells
+        # from every tier's portfolio, not just one.
+        fixed_six_by_tier = {
+            tier: set(REBALANCE_TARGET_WEIGHTS[tier]["obvious"]) for tier in portfolios_by_tier
+        }
+        for ticker, streak in streaks.items():
+            if not streak.flipped or streak.effective_status:
+                continue  # only act on a CONFIRMED obvious -> non-obvious flip
+
+            if ticker in discovered_tickers:
+                sell_targets = list(portfolios_by_tier.items())  # global pool: every tier
+            else:
+                owning_tier = next(
+                    (t for t, tickers in fixed_six_by_tier.items() if ticker in tickers), None
+                )
+                sell_targets = (
+                    [(owning_tier, portfolios_by_tier[owning_tier])] if owning_tier else []
+                )
+
+            for tier, portfolio in sell_targets:
                 logger.warning(
                     "CLASSIFICATION SELL: %s confirmed non-obvious after %d consecutive "
                     "day(s) (tier=%s, portfolio=%s) — selling full position.",
@@ -156,7 +199,7 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
                         ticker, tier,
                     )
 
-        # 3. Emergency stop-loss sweep — independent of the debounce
+        # 4. Emergency stop-loss sweep — independent of the debounce
         # above, checks EVERY currently-held position (obvious,
         # non-obvious, and crypto), not just the classification-tracked
         # fixed 6. See agent/stop_loss.py's module docstring for why this
@@ -177,7 +220,13 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
                     "new buys for it this cycle",
                     portfolio.id, tier, ", ".join(sorted(failed_obvious)),
                 )
-            if not obvious_pass:
+            if global_obvious_discovered:
+                logger.info(
+                    "portfolio=%s tier=%s: global obvious discovered tickers also "
+                    "targeted this cycle: %s",
+                    portfolio.id, tier, ", ".join(sorted(global_obvious_discovered)),
+                )
+            if not obvious_pass and not global_obvious_discovered:
                 total_obvious_pct = sum(obvious_base.values()) * 100
                 logger.warning(
                     "portfolio=%s tier=%s: ZERO obvious candidates pass this cycle — "
@@ -190,7 +239,9 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
             if dry_run:
                 plan = await plan_rebalance(
                     db, portfolio, tier,
-                    obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed,
+                    obvious_pass=obvious_pass,
+                    global_obvious_discovered=global_obvious_discovered,
+                    non_obvious_routed=non_obvious_routed,
                 )
                 for item in plan:
                     logger.info(
@@ -206,7 +257,9 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
             try:
                 trades = await rebalance_portfolio(
                     db, portfolio, tier,
-                    obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed,
+                    obvious_pass=obvious_pass,
+                    global_obvious_discovered=global_obvious_discovered,
+                    non_obvious_routed=non_obvious_routed,
                 )
                 if trades:
                     logger.info(

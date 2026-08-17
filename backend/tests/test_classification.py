@@ -26,11 +26,13 @@ import app.services.stock_data as stock_data
 from agent import agent_config, news_ingestion
 from agent.classification import (
     ClassificationResult,
+    StreakResult,
     _annualized_volatility,
     _gate_a,
     _gate_c,
     _weekly_returns,
     classify_ticker,
+    global_obvious_pool,
     route_non_obvious,
     update_streaks,
 )
@@ -220,14 +222,34 @@ def _result(ticker, *, is_obvious, vol_ratio):
     )
 
 
+def _streak(ticker, *, effective_status, raw_status=None):
+    """Builds a StreakResult with an explicit debounced effective_status
+    — route_non_obvious() checks THIS (not ClassificationResult.is_obvious
+    directly), see its docstring point 2. raw_status defaults to matching
+    effective_status (the "already confirmed, no debounce in flight"
+    case); pass it explicitly to simulate a mid-debounce ticker (raw
+    differs from effective)."""
+    raw = effective_status if raw_status is None else raw_status
+    return StreakResult(
+        ticker=ticker, raw_status=raw, consecutive_days=1,
+        effective_status=effective_status, previous_effective_status=effective_status,
+        flipped=False,
+    )
+
+
+def _streaks(**effective_by_ticker: bool) -> dict[str, StreakResult]:
+    return {t: _streak(t, effective_status=v) for t, v in effective_by_ticker.items()}
+
+
 def test_route_non_obvious_bands_by_volatility_ratio():
     classifications = {
         "CALM": _result("CALM", is_obvious=False, vol_ratio=1.2),   # -> conservative
         "MID": _result("MID", is_obvious=False, vol_ratio=2.5),     # -> moderate
         "WILD": _result("WILD", is_obvious=False, vol_ratio=8.0),   # -> aggressive
     }
+    streaks = _streaks(CALM=False, MID=False, WILD=False)
     routed = route_non_obvious(
-        classifications,
+        classifications, streaks,
         discovered_tickers={"CALM", "MID", "WILD"},
         confidence_by_ticker={"CALM": 0.5, "MID": 0.5, "WILD": 0.5},
     )
@@ -244,8 +266,9 @@ def test_route_non_obvious_never_routes_fixed_six_tickers():
         "BND": _result("BND", is_obvious=False, vol_ratio=1.0),  # fixed-6, fails classification
         "XYZ": _result("XYZ", is_obvious=False, vol_ratio=1.0),  # discovery-sourced
     }
+    streaks = _streaks(BND=False, XYZ=False)
     routed = route_non_obvious(
-        classifications,
+        classifications, streaks,
         discovered_tickers={"XYZ"},  # BND deliberately NOT in this set
         confidence_by_ticker={"XYZ": 0.7},
     )
@@ -254,15 +277,32 @@ def test_route_non_obvious_never_routes_fixed_six_tickers():
     assert "BND" not in all_routed_tickers
 
 
-def test_route_non_obvious_never_routes_obvious_classified_tickers():
-    classifications = {
-        "XYZ": _result("XYZ", is_obvious=True, vol_ratio=1.0),
-    }
+def test_route_non_obvious_never_routes_confirmed_obvious_tickers():
+    """A ticker with CONFIRMED (debounced) obvious status must never be
+    routed — it belongs in the global obvious pool instead (see
+    global_obvious_pool())."""
+    classifications = {"XYZ": _result("XYZ", is_obvious=True, vol_ratio=1.0)}
+    streaks = _streaks(XYZ=True)
     routed = route_non_obvious(
-        classifications, discovered_tickers={"XYZ"}, confidence_by_ticker={"XYZ": 0.9},
+        classifications, streaks, discovered_tickers={"XYZ"}, confidence_by_ticker={"XYZ": 0.9},
     )
     all_routed_tickers = {c.ticker for tier_list in routed.values() for c in tier_list}
     assert all_routed_tickers == set()
+
+
+def test_route_non_obvious_still_routes_a_ticker_mid_debounce_toward_obvious():
+    """The exact scenario route_non_obvious()'s docstring point 2 calls
+    out: a ticker passing RAW today (is_obvious=True) but not yet
+    CONFIRMED (effective_status still False, still mid-3-day-debounce)
+    must stay routable here — it hasn't left the non-obvious pool as far
+    as allocation is concerned until the global pool actually confirms
+    it."""
+    classifications = {"XYZ": _result("XYZ", is_obvious=True, vol_ratio=1.2)}
+    streaks = {"XYZ": _streak("XYZ", effective_status=False, raw_status=True)}
+    routed = route_non_obvious(
+        classifications, streaks, discovered_tickers={"XYZ"}, confidence_by_ticker={"XYZ": 0.9},
+    )
+    assert [c.ticker for c in routed["conservative"]] == ["XYZ"]
 
 
 def test_route_non_obvious_sorts_by_confidence_descending_within_tier():
@@ -270,8 +310,9 @@ def test_route_non_obvious_sorts_by_confidence_descending_within_tier():
         "LOW": _result("LOW", is_obvious=False, vol_ratio=1.0),
         "HIGH": _result("HIGH", is_obvious=False, vol_ratio=1.0),
     }
+    streaks = _streaks(LOW=False, HIGH=False)
     routed = route_non_obvious(
-        classifications,
+        classifications, streaks,
         discovered_tickers={"LOW", "HIGH"},
         confidence_by_ticker={"LOW": 0.2, "HIGH": 0.9},
     )
@@ -279,14 +320,34 @@ def test_route_non_obvious_sorts_by_confidence_descending_within_tier():
 
 
 def test_route_non_obvious_skips_candidates_with_no_volatility_ratio():
-    classifications = {
-        "NODATA": _result("NODATA", is_obvious=False, vol_ratio=None),
-    }
+    classifications = {"NODATA": _result("NODATA", is_obvious=False, vol_ratio=None)}
+    streaks = _streaks(NODATA=False)
     routed = route_non_obvious(
-        classifications, discovered_tickers={"NODATA"}, confidence_by_ticker={"NODATA": 0.9},
+        classifications, streaks, discovered_tickers={"NODATA"}, confidence_by_ticker={"NODATA": 0.9},
     )
     all_routed_tickers = {c.ticker for tier_list in routed.values() for c in tier_list}
     assert all_routed_tickers == set()
+
+
+# ---------------------------------------------------------------------
+# global_obvious_pool() — which discovered tickers have CONFIRMED
+# obvious status, shared across every tier
+# ---------------------------------------------------------------------
+
+
+def test_global_obvious_pool_includes_only_confirmed_obvious_discovered_tickers():
+    streaks = _streaks(XYZ=True, ABC=False, BND=True)  # BND is fixed-6, not discovered
+    pool = global_obvious_pool(streaks, discovered_tickers={"XYZ", "ABC"})
+    assert pool == {"XYZ"}  # ABC fails, BND excluded (not in discovered_tickers)
+
+
+def test_global_obvious_pool_excludes_mid_debounce_ticker():
+    """Raw passing today but not yet confirmed (effective_status still
+    False) must NOT appear in the pool yet — same 3-day requirement as
+    everything else."""
+    streaks = {"XYZ": _streak("XYZ", effective_status=False, raw_status=True)}
+    pool = global_obvious_pool(streaks, discovered_tickers={"XYZ"})
+    assert pool == set()
 
 
 # ---------------------------------------------------------------------
@@ -434,5 +495,45 @@ def test_update_streaks_same_day_rerun_is_idempotent_not_double_counted():
         )[ticker]
         assert r1_again.consecutive_days == 1  # NOT 2 — same calendar day, not double-counted
         assert r1_again.flipped is False
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------
+# Discovered ticker entering the GLOBAL obvious pool — full 3-day
+# integration (update_streaks() + global_obvious_pool() together),
+# proving a discovered ticker needs 3 consecutive REAL passing days,
+# not 1, before joining the pool that's shared across every tier.
+# ---------------------------------------------------------------------
+
+
+def test_discovered_ticker_needs_three_consecutive_passing_days_to_enter_global_pool():
+    """CONSTRUCTED: a discovered ticker (never seen before, so this is
+    its own bootstrap) starts failing, then passes 3 consecutive days —
+    global_obvious_pool() must exclude it on days 1 and 2, and only
+    include it starting day 3, mirroring the fixed-6 debounce exactly."""
+    ticker = "XYZ"
+    days = [date(2026, 2, i) for i in range(1, 5)]
+    db = SessionLocal()
+    try:
+        # Day 0: bootstrap, failing — never in the pool.
+        s0 = update_streaks(db, _classifications(**{ticker: False}), today=days[0])
+        assert global_obvious_pool(s0, discovered_tickers={ticker}) == set()
+
+        # Day 1 of passing (1/3): still not in the pool.
+        s1 = update_streaks(db, _classifications(**{ticker: True}), today=days[1])
+        assert s1[ticker].consecutive_days == 1
+        assert global_obvious_pool(s1, discovered_tickers={ticker}) == set()
+
+        # Day 2 of passing (2/3): still not in the pool.
+        s2 = update_streaks(db, _classifications(**{ticker: True}), today=days[2])
+        assert s2[ticker].consecutive_days == 2
+        assert global_obvious_pool(s2, discovered_tickers={ticker}) == set()
+
+        # Day 3 of passing (3/3): NOW it enters the global pool.
+        s3 = update_streaks(db, _classifications(**{ticker: True}), today=days[3])
+        assert s3[ticker].consecutive_days == 3
+        assert s3[ticker].flipped is True
+        assert global_obvious_pool(s3, discovered_tickers={ticker}) == {ticker}
     finally:
         db.close()

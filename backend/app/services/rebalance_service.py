@@ -143,6 +143,7 @@ def effective_target_weights(
     tier: str,
     *,
     obvious_pass: set[str] | None = None,
+    global_obvious_discovered: set[str] | None = None,
     non_obvious_routed: list[tuple[str, float]] | None = None,
 ) -> dict[str, float]:
     """Builds the flat {ticker: target_weight} dict plan_rebalance()
@@ -154,20 +155,48 @@ def effective_target_weights(
     debounced EFFECTIVE status, not the raw daily signal — see
     update_streaks()). A fixed ticker NOT in this set is omitted from the
     returned dict, AND its static base weight is redistributed
-    proportionally across the tickers that ARE in obvious_pass (scaled so
-    the survivors' weights still sum to the tier's FULL obvious envelope,
-    not just their own original weights) — see the code below. This
-    redistribution is what "sell it, don't just stop buying it" actually
-    means at the allocation-math level: the freed weight doesn't sit idle,
-    it goes to what's left. If obvious_pass is empty (every fixed ticker
-    for this tier currently fails), the whole envelope has nowhere to go
-    and is simply omitted — same as the non-obvious zero-candidates case
-    below, logged loudly by the caller (agent/run_rebalance.py), not
-    silently absorbed here. Defaults to "every fixed ticker for this
-    tier" (i.e. every key already in the static "obvious" sub-dict) when
-    None — trivially reproduces the original weights unchanged (nothing
-    to redistribute away from), the safe fallback for a cycle where
+    proportionally across the tier's full obvious pool (see below) —
+    this redistribution is what "sell it, don't just stop buying it"
+    actually means at the allocation-math level: the freed weight doesn't
+    sit idle, it goes to what's left. Defaults to "every fixed ticker for
+    this tier" when None — the safe fallback for a cycle where
     agent/classification.py hasn't run yet or wasn't passed in.
+
+    global_obvious_discovered: discovered tickers that have CONFIRMED
+    obvious status (agent/classification.global_obvious_pool() —
+    debounced, 3 consecutive days, same as obvious_pass) — folded into
+    EVERY tier's obvious bucket alongside its own fixed tickers, unlike
+    non_obvious_routed below (which is volatility-routed to exactly one
+    tier). This is deliberate: a discovered ticker that clears Gate C's
+    strict volatility bar (agent_config.VOLATILITY_MAX_VS_VOO) has
+    already proven itself "calm enough for any risk level," so there's no
+    reason to gatekeep it to a single tier the way a merely-volatile
+    non-obvious candidate is.
+
+    Each tier's full obvious pool = (obvious_pass ∩ this tier's fixed
+    tickers) ∪ global_obvious_discovered. Redistribution treats every
+    member of that pool proportionally to a NOMINAL weight: a fixed
+    ticker's nominal weight is its real static base weight (from
+    REBALANCE_TARGET_WEIGHTS), unchanged; a global discovered ticker's
+    nominal weight is this tier's AVERAGE fixed base weight (total
+    envelope / this tier's ORIGINAL fixed-ticker count — a stable
+    constant, not shrinking as the pool grows, so a 2nd or 3rd newcomer
+    is weighted the same "average fixed slice," not a moving target).
+    This choice matters concretely: it means today's real state (zero
+    discovered tickers currently qualify) reproduces the exact original
+    fixed-6 weights unchanged — this function's behavior is *exactly*
+    backward-compatible when global_obvious_discovered is empty — while
+    still giving a newly-qualifying ticker a fair, non-arbitrary starting
+    weight once one does qualify, rather than either ignoring it or
+    disrupting the fixed tickers' own mutual ratio (e.g. VOO:BND stays
+    ~63:37 between themselves; a newcomer just adds a third, fairly-sized
+    claim on the same envelope).
+
+    If the tier's full obvious pool is empty (every fixed ticker fails
+    AND nothing has been globally confirmed obvious), the whole envelope
+    has nowhere to go and is simply omitted — same as the non-obvious
+    zero-candidates case below, logged loudly by the caller
+    (agent/run_rebalance.py), not silently absorbed here.
 
     non_obvious_routed: (ticker, confidence) pairs already routed to this
     tier by agent/classification.route_non_obvious() — NOT yet capped or
@@ -185,24 +214,46 @@ def effective_target_weights(
     obvious_base = base["obvious"]
     if obvious_pass is None:
         obvious_pass = set(obvious_base)
+    global_obvious_discovered = global_obvious_discovered or set()
 
     total_obvious_envelope = sum(obvious_base.values())
-    passing_base_sum = sum(weight for t, weight in obvious_base.items() if t in obvious_pass)
+    # Stable per-tier constant — this tier's ORIGINAL fixed-ticker count,
+    # not the current pool size, so a 2nd/3rd newcomer doesn't shift what
+    # "one average fixed slice" means for tickers already in the pool.
+    newcomer_nominal_weight = (
+        total_obvious_envelope / len(obvious_base) if obvious_base else 0.0
+    )
+
+    pool = (obvious_pass & set(obvious_base)) | global_obvious_discovered
+    # Deterministic insertion order matters here: plan_rebalance() clamps
+    # each item against whatever cash is LEFT after the ones before it in
+    # iteration order (see plan_rebalance()'s remaining_cash accounting),
+    # so an unstable order (e.g. iterating a set/dict-from-set directly)
+    # would make WHICH ticker gets clamped first vary run to run. Fixed
+    # tickers keep their original REBALANCE_TARGET_WEIGHTS order; any
+    # global-obvious newcomers are appended after, sorted for determinism.
+    nominal_weight_by_ticker: dict[str, float] = {}
+    for ticker in obvious_base:
+        if ticker in pool:
+            nominal_weight_by_ticker[ticker] = obvious_base[ticker]
+    for ticker in sorted(pool - set(obvious_base)):
+        nominal_weight_by_ticker[ticker] = newcomer_nominal_weight
+    passing_nominal_sum = sum(nominal_weight_by_ticker.values())
 
     targets: dict[str, float] = {}
-    if passing_base_sum > 0:
-        # Proportional redistribution: survivors split the FULL envelope
-        # in their original relative proportions to each other, not just
-        # their own original weight — e.g. conservative with only VOO
-        # passing (BND excluded) gives VOO the entire 0.855 envelope, not
-        # just VOO's own original 0.540.
-        for ticker, weight in obvious_base.items():
-            if ticker in obvious_pass:
-                targets[ticker] = weight / passing_base_sum * total_obvious_envelope
-    # else: every fixed ticker for this tier currently fails — the whole
-    # envelope has nowhere to redistribute to, so it's simply omitted
-    # (left as cash). Deliberately not logged here (see docstring) — this
-    # is a pure function; the caller logs it loudly.
+    if passing_nominal_sum > 0:
+        # Proportional redistribution: the pool splits the FULL envelope
+        # by each member's nominal weight relative to the others' — e.g.
+        # conservative with only VOO passing (BND excluded, nothing
+        # globally obvious) gives VOO the entire 0.855 envelope, not just
+        # VOO's own original 0.540; a newly-qualifying global ticker
+        # joins that same split using its own nominal weight above.
+        for ticker, nominal_weight in nominal_weight_by_ticker.items():
+            targets[ticker] = nominal_weight / passing_nominal_sum * total_obvious_envelope
+    # else: the tier's full obvious pool is empty — the whole envelope
+    # has nowhere to redistribute to, so it's simply omitted (left as
+    # cash). Deliberately not logged here (see docstring) — this is a
+    # pure function; the caller logs it loudly.
 
     if non_obvious_routed:
         cap = agent_config.MAX_CONCURRENT_NON_OBVIOUS[tier]
@@ -266,18 +317,19 @@ async def plan_rebalance(
     tier: str,
     *,
     obvious_pass: set[str] | None = None,
+    global_obvious_discovered: set[str] | None = None,
     non_obvious_routed: list[tuple[str, float]] | None = None,
 ) -> list[RebalancePlanItem]:
     """Pure computation, no side effects: current allocation vs.
     effective_target_weights(tier, ...) (obvious tickers that currently
-    pass classification, plus this cycle's routed+capped+equal-weighted
-    non-obvious tickers — see that function's docstring for the
-    obvious_pass/non_obvious_routed defaults), with available cash
-    already reduced by _pending_buy_notional(). Used both by
-    rebalance_portfolio() (which executes the resulting buys) and by
-    run_rebalance.py's --dry-run mode (which only logs it) — one code
-    path computes the plan, so dry-run can never drift from what a real
-    run would actually do.
+    pass classification, PLUS any discovered tickers confirmed obvious
+    globally, plus this cycle's routed+capped+equal-weighted non-obvious
+    tickers — see that function's docstring for what each parameter does
+    and its default), with available cash already reduced by
+    _pending_buy_notional(). Used both by rebalance_portfolio() (which
+    executes the resulting buys) and by run_rebalance.py's --dry-run mode
+    (which only logs it) — one code path computes the plan, so dry-run
+    can never drift from what a real run would actually do.
 
     available_cash below MIN_TRADE_DOLLARS skips the whole portfolio
     (nothing meaningful is buyable regardless of allocation gaps); an
@@ -286,7 +338,10 @@ async def plan_rebalance(
     plan already spent the rest of available_cash) skips just that
     asset, not the whole portfolio."""
     targets = effective_target_weights(
-        tier, obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed
+        tier,
+        obvious_pass=obvious_pass,
+        global_obvious_discovered=global_obvious_discovered,
+        non_obvious_routed=non_obvious_routed,
     )
 
     summary = await build_portfolio_summary(db, portfolio)
@@ -360,20 +415,25 @@ async def rebalance_portfolio(
     tier: str,
     *,
     obvious_pass: set[str] | None = None,
+    global_obvious_discovered: set[str] | None = None,
     non_obvious_routed: list[tuple[str, float]] | None = None,
 ) -> list[Trade]:
     """Executes plan_rebalance()'s buys (items with skip_reason is None)
     through the same execute_trade()/record_trade_fill() path
     decision_loop.py and auto_invest_service.py already use, tagged
-    source="rebalance" — same tag for both obvious and non-obvious buys,
-    not split further; distinguishing them in trade history if needed
-    later can read effective_target_weights()'s two source dicts, no
-    schema change required for that today. Returns the Trade rows
-    actually filled — empty if nothing needed buying or available cash
-    didn't allow it. See obvious_pass/non_obvious_routed on
+    source="rebalance" — same tag for every buy this function makes
+    (obvious fixed, global-obvious discovered, or non-obvious), not split
+    further; distinguishing them in trade history if needed later can
+    read effective_target_weights()'s source dicts, no schema change
+    required for that today. Returns the Trade rows actually filled —
+    empty if nothing needed buying or available cash didn't allow it. See
+    obvious_pass/global_obvious_discovered/non_obvious_routed on
     plan_rebalance() for what these parameters do and their defaults."""
     plan = await plan_rebalance(
-        db, portfolio, tier, obvious_pass=obvious_pass, non_obvious_routed=non_obvious_routed
+        db, portfolio, tier,
+        obvious_pass=obvious_pass,
+        global_obvious_discovered=global_obvious_discovered,
+        non_obvious_routed=non_obvious_routed,
     )
 
     trades: list[Trade] = []

@@ -25,6 +25,16 @@ calls plus one Finnhub company-news call per ticker — and avoids a
 "discovered on day 1, silently never reclassified again" staleness bug an
 incremental approach would risk.
 
+A discovered ticker that CONFIRMS obvious status (3 consecutive passing
+days, same debounce as every other status transition — see
+update_streaks()) stops being a route_non_obvious() candidate and
+instead joins global_obvious_pool() — a ticker set folded into EVERY
+tier's obvious bucket (not volatility-routed to one tier like an
+ordinary non-obvious candidate), since clearing Gate C's strict
+volatility bar already means it's calm enough for any risk level. See
+app.services.rebalance_service.effective_target_weights() for how that
+pool actually changes each tier's target weights.
+
 Does NOT touch agent/discovery.py's validation gates (a/b/c) or
 decision_loop.py's news-driven trading — those are explicitly out of
 scope for this module.
@@ -310,6 +320,7 @@ def _tier_band_for_vol_ratio(vol_ratio: float) -> str:
 
 def route_non_obvious(
     classifications: dict[str, ClassificationResult],
+    streaks: dict[str, StreakResult],
     *,
     discovered_tickers: set[str],
     confidence_by_ticker: dict[str, float],
@@ -319,7 +330,7 @@ def route_non_obvious(
     agent_config.NON_OBVIOUS_VOL_BAND_* for the band cutoffs and their
     reasoning).
 
-    Two scoping decisions, both deliberate:
+    Three scoping decisions, all deliberate:
 
     1. Fixed-6 tickers are NEVER routed here, even if they classify as
        non-obvious. Classification is computed for them (useful history/
@@ -330,7 +341,20 @@ def route_non_obvious(
        "discovered" in the first place. `discovered_tickers` is what
        enforces this scoping.
 
-    2. Exactly one tier, not overlapping adjacent tiers: a ticker's
+    2. Checks the DEBOUNCED effective status (via `streaks`), not the raw
+       daily is_obvious — a discovered ticker that just started passing
+       today (raw=True, effective still False, mid-debounce toward
+       global-obvious-pool entry) stays routable here, since it hasn't
+       actually left the non-obvious pool yet as far as allocation is
+       concerned. Only once a ticker is CONFIRMED obvious (3 consecutive
+       days — see update_streaks()) does it stop being routed here at
+       all: agent/run_rebalance.py's cycle then folds it into the global
+       obvious pool (rebalance_service.effective_target_weights()'s
+       `global_obvious_discovered`) instead, which — being cross-tier,
+       not routed to one tier's cap — automatically frees whatever
+       non-obvious slot it used to occupy in this function's output.
+
+    3. Exactly one tier, not overlapping adjacent tiers: a ticker's
        volatility ratio is a single point-in-time number, and routing it
        into multiple tiers at once would mean two INDEPENDENT agent
        portfolios (each tier is its own Portfolio row, no shared
@@ -340,7 +364,11 @@ def route_non_obvious(
        moderate model portfolios suddenly hold the same microcap?") for
        no clear benefit. A clean partition keeps each tier's non-obvious
        bucket interpretable as "names at THIS tier's risk level," not a
-       blurry shared set.
+       blurry shared set. (The global obvious pool, by contrast, IS
+       deliberately shared across every tier — see effective_target_
+       weights()'s docstring for why that's the right call there:
+       clearing Gate C's strict volatility bar already means "calm enough
+       for any risk level," unlike an ordinary non-obvious candidate.)
 
     Sorted by discovery confidence, descending, within each tier — the
     ranking agent/run_rebalance.py's cycle uses to pick which candidates
@@ -352,8 +380,9 @@ def route_non_obvious(
     for ticker, result in classifications.items():
         if ticker not in discovered_tickers:
             continue  # fixed-6 tickers are never routed — see docstring
-        if result.is_obvious:
-            continue  # only non-obvious tickers get routed
+        streak = streaks.get(ticker)
+        if streak is not None and streak.effective_status:
+            continue  # CONFIRMED obvious -> global obvious pool, not routed here
         if result.vol_ratio is None:
             logger.info(
                 "skipping non-obvious routing for %s: no volatility ratio "
@@ -491,3 +520,30 @@ def update_streaks(
 
     db.commit()
     return results
+
+
+def global_obvious_pool(
+    streaks: dict[str, StreakResult], *, discovered_tickers: set[str]
+) -> set[str]:
+    """Discovered tickers CONFIRMED obvious (debounced effective_status
+    True via update_streaks() — one good raw day is never enough, same
+    3-day requirement as every other status transition) — the set
+    rebalance_service.effective_target_weights() folds into EVERY tier's
+    obvious bucket, not just one (see that function's docstring for why
+    "shared across every tier" is the right call for a ticker that's
+    cleared Gate C's strict volatility bar: it's calm enough for any risk
+    level, unlike an ordinary non-obvious candidate, which stays
+    volatility-routed to a single tier via route_non_obvious()).
+
+    Fixed-6 tickers are excluded via `discovered_tickers` the same way
+    route_non_obvious() excludes them — this pool is specifically "which
+    DISCOVERED tickers have earned their way into the obvious bucket,"
+    not a general "everyone currently obvious" set (the fixed 6's own
+    obvious/non-obvious status is read directly off `streaks` by
+    agent/run_rebalance.py, unchanged from before this pool existed).
+    """
+    return {
+        ticker
+        for ticker in discovered_tickers
+        if streaks.get(ticker) is not None and streaks[ticker].effective_status
+    }
