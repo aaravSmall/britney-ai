@@ -55,6 +55,7 @@ agent_config.SPLIT_RATIOS (conservative 90/10, moderate 75/25, aggressive
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -339,7 +340,20 @@ async def rebalance_portfolio(
         price = await market_data.get_price_for_holding(item.symbol, "stock")
         if price is None:
             continue
-        quantity = round(item.buy_dollars / price, 6)
+        # Floor to 6 decimals, not round() — rounding UP can make
+        # quantity*price exceed item.buy_dollars by a fraction of a cent.
+        # That's harmless when buy_dollars is well under available cash,
+        # but plan_rebalance() clamps buy_dollars to EXACTLY the tier's
+        # remaining cash whenever that's the binding constraint (routine
+        # for a non-obvious envelope buy, which is often the last/only
+        # item competing for 100% of what's left) — a real run hit
+        # exactly this: quantity=1.138022 (round()) * price=$226.383 =
+        # $257.628834, a hair above a cash_balance of $257.6287746,
+        # tripping _settle_fill()'s InsufficientFundsError on a "fully
+        # funded" buy. Flooring instead of rounding guarantees
+        # quantity*price <= buy_dollars always, for every buy, not just
+        # cash-clamped ones.
+        quantity = math.floor((item.buy_dollars / price) * 1_000_000) / 1_000_000
         if quantity <= 0:
             continue
 
@@ -364,7 +378,20 @@ async def rebalance_portfolio(
             # Cash moved between plan_rebalance()'s snapshot and this
             # fill (e.g. an earlier item in this same plan spent more
             # than expected due to price drift) — skip this one, next
-            # day's run re-evaluates from scratch.
+            # day's run re-evaluates from scratch. MUST roll back: this
+            # function's caller (run_rebalance.py's _run_cycle()) shares
+            # ONE db session across all 3 portfolios in a cycle.
+            # record_trade_fill() had already done db.add(trade) +
+            # db.flush() (assigning an id, sending the INSERT within the
+            # still-open transaction) before this exception — without
+            # this rollback, that orphaned insert stays pending and gets
+            # silently swept into whatever THIS OR A LATER portfolio's
+            # next successful db.commit() happens to do, leaving a
+            # status="filled" Trade row with no actual cash/holdings/
+            # ledger effect. Caught exactly this in production (Trade
+            # id=107) before this fix — see the commit that added this
+            # comment for the full root-cause writeup.
+            db.rollback()
             continue
 
         trades.append(trade)

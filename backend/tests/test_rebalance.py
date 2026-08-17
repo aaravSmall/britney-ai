@@ -432,3 +432,152 @@ def test_non_obvious_routed_candidates_actually_get_bought(client, fixed_prices,
         f"\nNon-obvious buy: {trades[0].quantity} XYZ @ $50.00 "
         f"(${trades[0].quantity * 50.0:,.2f} of the ${expected_dollars:,.2f} envelope)"
     )
+
+
+def test_exact_cash_clamp_rounding_does_not_raise_insufficient_funds(client, monkeypatch):
+    """Regression test for a real production incident: plan_rebalance()
+    can clamp buy_dollars to EXACTLY a portfolio's remaining cash
+    (routine when a non-obvious envelope buy is the last/only item
+    competing for 100% of what's left). The OLD `quantity =
+    round(buy_dollars / price, 6)` could round UP, making
+    quantity*price a fraction of a cent MORE than buy_dollars — which,
+    when buy_dollars == cash_balance exactly, tripped
+    _settle_fill()'s InsufficientFundsError on a fully-funded buy, and
+    left an orphaned "filled" Trade row with no cash/holdings/ledger
+    effect at all (see rebalance_portfolio()'s except-clause comment).
+    These are the EXACT real numbers from that incident."""
+    cash_balance = 257.6287746000014
+    price = 226.383
+    # Documents the bug's precondition: the old round()-based quantity
+    # really did cost more than the exact available cash.
+    old_buggy_quantity = round(cash_balance / price, 6)
+    assert old_buggy_quantity * price > cash_balance
+
+    async def _fake_price(symbol, asset_type):
+        return price
+
+    monkeypatch.setattr(market_data, "get_price_for_holding", _fake_price)
+
+    async def _fake_plan(db, portfolio, tier, **kwargs):
+        return [
+            rebalance_service.RebalancePlanItem(
+                symbol="BA", current_weight=0.0, target_weight=1.0,
+                shortfall_weight=1.0, buy_dollars=cash_balance, skip_reason=None,
+            )
+        ]
+
+    monkeypatch.setattr(rebalance_service, "plan_rebalance", _fake_plan)
+
+    db = SessionLocal()
+    try:
+        portfolio = _new_agent_portfolio(db, cash_balance=cash_balance)
+        portfolio_id = portfolio.id
+
+        trades = asyncio.run(rebalance_portfolio(db, portfolio, "conservative"))
+    finally:
+        db.close()
+
+    assert len(trades) == 1  # no InsufficientFundsError this time
+    assert trades[0].symbol == "BA"
+    assert trades[0].status == "filled"
+    assert trades[0].quantity * price <= cash_balance  # the actual fix
+
+    db = SessionLocal()
+    try:
+        entries = (
+            db.query(CashLedgerEntry)
+            .filter(CashLedgerEntry.portfolio_id == portfolio_id)
+            .all()
+        )
+        assert len(entries) == 1  # a real ledger entry — NOT orphaned
+        portfolio = db.get(Portfolio, portfolio_id)
+        holdings = {h.symbol: h for h in portfolio.holdings}
+        assert "BA" in holdings and holdings["BA"].quantity > 0
+
+        print(
+            f"\nExact-cash-clamp regression: cash_balance=${cash_balance} price=${price} -> "
+            f"old (buggy) round()-quantity={old_buggy_quantity} would have cost "
+            f"${old_buggy_quantity * price:.6f} (over cash) — new floor()-quantity="
+            f"{trades[0].quantity} costs ${trades[0].quantity * price:.6f} (fits). "
+            f"1 ledger entry recorded (not orphaned)."
+        )
+    finally:
+        db.close()
+
+
+def test_insufficient_funds_error_rolls_back_and_leaves_no_orphaned_trade(client, monkeypatch):
+    """A LEGITIMATE InsufficientFundsError (real price drift between
+    planning and execution, not just the rounding edge case above) must
+    roll back cleanly: zero orphaned Trade row, and the shared db
+    session must still be usable for whatever runs next in the same
+    cycle — agent/run_rebalance.py's _run_cycle() shares ONE session
+    across all 3 portfolios, so a caught-but-not-rolled-back exception
+    here would poison every later portfolio's commit in the same run,
+    which is exactly the mechanism that orphaned a real Trade row in
+    production before this fix."""
+
+    async def _fake_price(symbol, asset_type):
+        return 100.0
+
+    monkeypatch.setattr(market_data, "get_price_for_holding", _fake_price)
+
+    async def _fake_plan(db, portfolio, tier, **kwargs):
+        # A stale plan claiming $1,000 is buyable — but the portfolio
+        # below only actually has $1.00, simulating exactly the drift
+        # the original code's own comment describes ("cash moved between
+        # plan_rebalance()'s snapshot and this fill"). quantity=10.0 @
+        # $100 = $1,000 cost, unambiguously over the real $1.00 balance
+        # regardless of any rounding nuance — a genuine shortfall.
+        return [
+            rebalance_service.RebalancePlanItem(
+                symbol="EXPENSIVE", current_weight=0.0, target_weight=1.0,
+                shortfall_weight=1.0, buy_dollars=1_000.0, skip_reason=None,
+            )
+        ]
+
+    monkeypatch.setattr(rebalance_service, "plan_rebalance", _fake_plan)
+
+    db = SessionLocal()
+    try:
+        portfolio = _new_agent_portfolio(db, cash_balance=1.0)
+        portfolio_id = portfolio.id
+
+        trades = asyncio.run(rebalance_portfolio(db, portfolio, "conservative"))
+
+        # The session must still be perfectly usable after the caught +
+        # rolled-back exception — proven by successfully committing
+        # something else on the SAME session right after, the exact
+        # shared-session scenario run_rebalance.py's cycle creates.
+        db.add(
+            PortfolioHolding(
+                portfolio_id=portfolio.id, symbol="PROOF", asset_type="stock",
+                quantity=1.0, avg_cost=1.0,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert trades == []  # the buy correctly never happened
+
+    db = SessionLocal()
+    try:
+        expensive_trades = (
+            db.query(rebalance_service.Trade)
+            .filter(
+                rebalance_service.Trade.portfolio_id == portfolio_id,
+                rebalance_service.Trade.symbol == "EXPENSIVE",
+            )
+            .all()
+        )
+        assert expensive_trades == []  # NOT orphaned — rollback cleared the flushed insert
+
+        portfolio = db.get(Portfolio, portfolio_id)
+        assert any(h.symbol == "PROOF" for h in portfolio.holdings)  # later commit unaffected
+
+        print(
+            f"\nRollback regression: 0 orphaned 'EXPENSIVE' trade rows after a real "
+            f"InsufficientFundsError; later commit on the same session succeeded."
+        )
+    finally:
+        db.close()
