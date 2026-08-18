@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.database import SessionLocal
-from app.models import AutoInvestSchedule, CashLedgerEntry, Trade
+from app.models import AutoInvestSchedule, CashLedgerEntry, Portfolio, Trade
 from app.services.auto_invest_service import execute_schedule, is_due
 from app.services.portfolio_service import InsufficientFundsError
 from agent.run_auto_invest import _run_cycle
@@ -254,6 +254,69 @@ def test_execute_schedule_insufficient_funds_does_not_update_last_executed_at(cl
             asyncio.run(execute_schedule(db, schedule))
         db.refresh(schedule)
         assert schedule.last_executed_at is None
+    finally:
+        db.close()
+
+
+def test_execute_schedule_exact_amount_rounding_does_not_raise_insufficient_funds(
+    client, monkeypatch
+):
+    """Regression test for the same class of bug fixed in
+    rebalance_service.py: schedule.amount is a fixed dollar target that
+    can sit arbitrarily close to a portfolio's real cash_balance (e.g. a
+    user funding the account with just enough for their next auto-invest
+    buy) — the OLD `quantity = round(schedule.amount / price, 6)` could
+    round UP, making quantity*price a fraction of a cent MORE than
+    schedule.amount. When cash_balance == schedule.amount exactly, that
+    tripped _settle_fill()'s InsufficientFundsError on a fully-funded
+    buy. Reuses the exact real incident numbers from
+    test_rebalance.py's test_exact_cash_clamp_rounding_does_not_raise_
+    insufficient_funds, which already proves round() rounds up for this
+    pair."""
+    cash_balance = 257.6287746000014
+    price = 226.383
+    old_buggy_quantity = round(cash_balance / price, 6)
+    assert old_buggy_quantity * price > cash_balance  # documents the bug's precondition
+
+    async def _fake_price(symbol, asset_type):
+        return price
+
+    import app.services.auto_invest_service as auto_invest_service
+
+    monkeypatch.setattr(auto_invest_service.market_data, "get_price_for_holding", _fake_price)
+
+    token = "auto-invest-test-exact-clamp-user"
+    portfolio_id = _own_portfolio_id(client, token)
+
+    db = SessionLocal()
+    try:
+        portfolio = db.get(Portfolio, portfolio_id)
+        portfolio.cash_balance = cash_balance
+        db.commit()
+    finally:
+        db.close()
+
+    created = client.post(
+        "/auto-invest/schedules",
+        json={"ticker": "AAPL", "amount": cash_balance, "interval": "daily"},
+        headers=_auth(token),
+    ).json()
+
+    db = SessionLocal()
+    try:
+        schedule = db.get(AutoInvestSchedule, created["id"])
+        trade = asyncio.run(execute_schedule(db, schedule))  # no InsufficientFundsError
+
+        assert trade.quantity * price <= cash_balance  # the actual fix
+        db.refresh(schedule)
+        assert schedule.last_executed_at is not None
+
+        print(
+            f"\nAuto-invest exact-amount regression: cash_balance=${cash_balance} "
+            f"price=${price} -> old (buggy) round()-quantity={old_buggy_quantity} would "
+            f"have cost ${old_buggy_quantity * price:.6f} (over amount) — new "
+            f"floor()-quantity={trade.quantity} costs ${trade.quantity * price:.6f} (fits)."
+        )
     finally:
         db.close()
 

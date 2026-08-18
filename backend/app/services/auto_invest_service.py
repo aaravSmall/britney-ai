@@ -13,6 +13,7 @@ from app.models import AutoInvestSchedule, Portfolio, Trade
 from app.services import market_data
 from app.services.portfolio_service import record_trade_fill
 from app.trading.execution import execute_trade
+from app.trading.sizing import floor_to_6dp
 
 # Simple elapsed-time thresholds, not calendar-aware (a "monthly"
 # schedule fires every ~30 days, not on a fixed day-of-month).
@@ -46,7 +47,12 @@ async def execute_schedule(db: Session, schedule: AutoInvestSchedule) -> Trade:
     if price is None:
         raise ValueError(f"No price available for {schedule.ticker}")
 
-    quantity = round(schedule.amount / price, 6)
+    # Floor, not round() — rounding up can make quantity*price exceed
+    # schedule.amount by a fraction of a cent, which trips
+    # InsufficientFundsError when cash_balance sits close to
+    # schedule.amount (the same production mechanism fixed in
+    # rebalance_service.py — see app.trading.sizing.floor_to_6dp).
+    quantity = floor_to_6dp(schedule.amount / price)
     if quantity <= 0:
         raise ValueError(f"Computed buy quantity for {schedule.ticker} was zero.")
 

@@ -73,7 +73,6 @@ agent_config.SPLIT_RATIOS (conservative 90/10, moderate 75/25, aggressive
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -88,6 +87,7 @@ from app.services.portfolio_service import (
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
+from app.trading.sizing import floor_to_6dp
 
 logger = logging.getLogger(__name__)
 
@@ -456,8 +456,10 @@ async def rebalance_portfolio(
         # tripping _settle_fill()'s InsufficientFundsError on a "fully
         # funded" buy. Flooring instead of rounding guarantees
         # quantity*price <= buy_dollars always, for every buy, not just
-        # cash-clamped ones.
-        quantity = math.floor((item.buy_dollars / price) * 1_000_000) / 1_000_000
+        # cash-clamped ones. See app.trading.sizing.floor_to_6dp — same
+        # shared helper now used by auto_invest_service.py and
+        # agent/decision_loop.py's own buy/sell sizing.
+        quantity = floor_to_6dp(item.buy_dollars / price)
         if quantity <= 0:
             continue
 
