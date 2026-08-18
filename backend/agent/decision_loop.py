@@ -433,6 +433,18 @@ async def run_once(portfolio_id: int) -> RunSummary:
                         InsufficientHoldingsError,
                         ValueError,
                     ) as e:
+                        # record_trade_fill() may have already done db.add(trade)
+                        # + db.flush() (a status="filled" insert) before
+                        # _settle_fill() raised InsufficientFundsError/
+                        # InsufficientHoldingsError — without this rollback,
+                        # that orphaned insert stays pending in this shared
+                        # session and gets silently swept into
+                        # create_agent_decision()'s db.commit() a few lines
+                        # below, in this same iteration. Same fix already
+                        # applied to rebalance_service.py's buy loop and
+                        # sell_full_position() — see those for the full
+                        # root-cause writeup.
+                        db.rollback()
                         decision = "hold"
                         note = f"Execution failed, held instead: {e}"
 
