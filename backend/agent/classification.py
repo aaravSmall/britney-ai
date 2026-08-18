@@ -542,6 +542,17 @@ def global_obvious_pool(
     obvious/non-obvious status is read directly off `streaks` by
     agent/run_rebalance.py, unchanged from before this pool existed).
     """
+    # This set comprehension has non-deterministic iteration order (it
+    # iterates `discovered_tickers`, itself a set). That's currently safe
+    # ONLY because this function's sole caller,
+    # rebalance_service.effective_target_weights(), re-sorts this return
+    # value before using it (`sorted(pool - set(obvious_base))`) rather
+    # than iterating it directly. Any future caller that consumes this
+    # return value directly — e.g. to decide which pool member gets
+    # clamped first against a shared cash budget — would need its own
+    # deterministic ordering, or would risk reintroducing the exact
+    # unstable-iteration-order bug class already found and fixed once in
+    # this module's redistribution logic (2026-08-17/18 incident).
     return {
         ticker
         for ticker in discovered_tickers
