@@ -16,3 +16,4 @@ yfinance==1.5.2
 
 # dev / test
 pytest==9.1.1
+hypothesis==6.165.10
