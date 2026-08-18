@@ -31,9 +31,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
+import agent.run_rebalance as run_rebalance
 import app.services.market_data as market_data
 import app.services.rebalance_service as rebalance_service
 from agent import agent_config
+from agent.classification import StreakResult
 from app.database import SessionLocal
 from app.models import CashLedgerEntry, Portfolio, PortfolioHolding
 from app.services.portfolio_service import queue_pending_trade
@@ -789,3 +791,117 @@ def test_global_pool_removal_redistributes_among_remaining_dynamic_pool():
     assert sum(without_xyz.values()) == pytest.approx(sum(with_xyz.values()))
 
     print(f"\nWith XYZ: {with_xyz}\nWithout XYZ (removed, redistributed back): {without_xyz}")
+
+
+# ---------------------------------------------------------------------
+# agent/run_rebalance.py's _run_cycle() — per-item isolation in the
+# classification-sell loop and the stop-loss sweep call, so one
+# unexpected exception doesn't cancel the rest of that day's cycle.
+# ---------------------------------------------------------------------
+
+
+def test_cycle_isolates_unexpected_sell_failures_and_still_runs_buy_loop_for_every_tier(
+    client, monkeypatch, caplog
+):
+    """CONSTRUCTED: forces an unexpected (NOT InsufficientHoldingsError —
+    sell_full_position already handles that one itself) exception at both
+    of the new try/except sites added to _run_cycle(): the classification-
+    sell loop's per-ticker sell (VOO, conservative) and the stop-loss
+    sweep call. Confirms neither cancels the rest of the cycle: SPY's
+    classification sell (moderate) still gets attempted after VOO's
+    failure, and every tier's buy loop still runs after the stop-loss
+    sweep's failure. Classification/discovery are mocked entirely (no
+    network calls, no real TickerStreakState writes) and
+    sell_full_position/rebalance_portfolio are mocked to record calls
+    without touching real cash/holdings — this test is scoped to
+    run_rebalance.py's own orchestration/exception-handling, not the
+    functions it calls."""
+
+    async def _fake_classify_all(db):
+        return {}
+
+    def _fake_distinct_discovered_tickers(db):
+        return set()
+
+    def _fake_latest_confidence_by_ticker(db):
+        return {}
+
+    streaks = {
+        "VOO": StreakResult(
+            ticker="VOO", raw_status=False, consecutive_days=3,
+            effective_status=False, previous_effective_status=True, flipped=True,
+        ),
+        "SPY": StreakResult(
+            ticker="SPY", raw_status=False, consecutive_days=3,
+            effective_status=False, previous_effective_status=True, flipped=True,
+        ),
+    }
+
+    def _fake_update_streaks(db, classifications, **kwargs):
+        return streaks
+
+    def _fake_route_non_obvious(classifications, streaks_arg, **kwargs):
+        return {"conservative": [], "moderate": [], "aggressive": []}
+
+    def _fake_global_obvious_pool(streaks_arg, **kwargs):
+        return set()
+
+    sell_calls: list[str] = []
+
+    async def _fake_sell_full_position(db, portfolio, ticker, asset_type, *, source):
+        sell_calls.append(ticker)
+        if ticker == "VOO":
+            raise RuntimeError("simulated unexpected sell failure")
+        return None  # SPY: a legitimate "nothing to sell" outcome
+
+    async def _fake_stop_loss_sweep(db):
+        raise RuntimeError("simulated unexpected stop-loss sweep failure")
+
+    buy_loop_calls: list[str] = []
+
+    async def _fake_rebalance_portfolio(db, portfolio, tier, **kwargs):
+        buy_loop_calls.append(tier)
+        return []
+
+    monkeypatch.setattr(run_rebalance.classification, "classify_all", _fake_classify_all)
+    monkeypatch.setattr(
+        run_rebalance.discovery_service,
+        "distinct_discovered_tickers",
+        _fake_distinct_discovered_tickers,
+    )
+    monkeypatch.setattr(
+        run_rebalance.discovery_service,
+        "latest_confidence_by_ticker",
+        _fake_latest_confidence_by_ticker,
+    )
+    monkeypatch.setattr(run_rebalance.classification, "update_streaks", _fake_update_streaks)
+    monkeypatch.setattr(run_rebalance.classification, "route_non_obvious", _fake_route_non_obvious)
+    monkeypatch.setattr(
+        run_rebalance.classification, "global_obvious_pool", _fake_global_obvious_pool
+    )
+    monkeypatch.setattr(run_rebalance, "sell_full_position", _fake_sell_full_position)
+    monkeypatch.setattr(
+        run_rebalance.stop_loss, "check_all_positions_and_sell", _fake_stop_loss_sweep
+    )
+    monkeypatch.setattr(run_rebalance, "rebalance_portfolio", _fake_rebalance_portfolio)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(run_rebalance._run_cycle())
+
+    # VOO's forced failure didn't stop SPY's sell from being attempted —
+    # per-item isolation inside the classification-sell loop.
+    assert sell_calls == ["VOO", "SPY"]
+
+    # The stop-loss sweep's forced failure didn't cancel the buy loop —
+    # it still ran for every tier afterward.
+    assert set(buy_loop_calls) == {"conservative", "moderate", "aggressive"}
+
+    log_text = caplog.text
+    assert "CLASSIFICATION SELL failed unexpectedly" in log_text
+    assert "Stop-loss sweep failed unexpectedly" in log_text
+
+    print(
+        f"\nCycle-resilience regression: sells attempted for {sell_calls} (VOO failed, "
+        f"SPY still ran), buy loop ran for {sorted(buy_loop_calls)} despite both forced "
+        f"failures.\n--- captured log excerpt ---\n{log_text}"
+    )

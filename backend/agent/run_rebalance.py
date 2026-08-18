@@ -186,7 +186,26 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
                     "day(s) (tier=%s, portfolio=%s) — selling full position.",
                     ticker, streak.consecutive_days, tier, portfolio.id,
                 )
-                trade = await sell_full_position(db, portfolio, ticker, "stock", source="rebalance")
+                # Per-item try/except, same shape as the buy loop below
+                # (line ~257) — sell_full_position() only rolls back on
+                # its own InsufficientHoldingsError; any OTHER exception
+                # (network, DB, a bug) must not be allowed to propagate
+                # out of this loop and cancel the stop-loss sweep and
+                # every tier's buy loop that come after it in this same
+                # cycle. One ticker's failure here just means it's
+                # retried next cycle, same as a failed buy already does.
+                try:
+                    trade = await sell_full_position(
+                        db, portfolio, ticker, "stock", source="rebalance"
+                    )
+                except Exception:
+                    logger.exception(
+                        "CLASSIFICATION SELL failed unexpectedly: portfolio=%s ticker=%s "
+                        "— rolled back, will retry next cycle",
+                        portfolio.id, ticker,
+                    )
+                    db.rollback()
+                    continue
                 if trade:
                     logger.warning(
                         "CLASSIFICATION SELL executed: portfolio=%s sold %s %s @ $%.2f",
@@ -204,7 +223,17 @@ async def _run_cycle(*, dry_run: bool = False) -> None:
         # non-obvious, and crypto), not just the classification-tracked
         # fixed 6. See agent/stop_loss.py's module docstring for why this
         # also runs every 3 min from agent/run_agent.py, not just here.
-        await stop_loss.check_all_positions_and_sell(db)
+        # Wrapped the same way as the classification-sell loop above and
+        # the buy loop below: an unexpected failure partway through the
+        # sweep must not cancel every tier's buy loop that follows it in
+        # this same cycle.
+        try:
+            await stop_loss.check_all_positions_and_sell(db)
+        except Exception:
+            logger.exception(
+                "Stop-loss sweep failed unexpectedly — rolled back, will retry next cycle"
+            )
+            db.rollback()
 
         for tier, portfolio in portfolios_by_tier.items():
             obvious_base = REBALANCE_TARGET_WEIGHTS[tier]["obvious"]
