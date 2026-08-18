@@ -57,6 +57,7 @@ from app.services.portfolio_service import (
     record_trade_fill,
 )
 from app.trading.execution import execute_trade
+from app.trading.sizing import floor_to_6dp
 
 logger = logging.getLogger(__name__)
 
@@ -229,12 +230,18 @@ async def _execute(
 
     if side == "buy":
         dollar_amount = portfolio.cash_balance * profile["position_size_pct"]
-        quantity = round(dollar_amount / price, 6)
+        # Floor, not round() — see app.trading.sizing.floor_to_6dp. Same
+        # fix as rebalance_service.py/auto_invest_service.py: guarantees
+        # quantity*price <= dollar_amount always.
+        quantity = floor_to_6dp(dollar_amount / price)
     else:  # sell
         holding = next(
             h for h in portfolio.holdings if h.symbol == ticker and h.asset_type == asset_type
         )
-        quantity = round(holding.quantity * profile["position_size_pct"], 6)
+        # Floor, then cap at holding.quantity explicitly — a floored-up
+        # sell can never exceed what's held even if position_size_pct
+        # were ever raised to/above 1.0.
+        quantity = min(floor_to_6dp(holding.quantity * profile["position_size_pct"]), holding.quantity)
 
     if quantity <= 0:
         raise ValueError(f"Computed {side} quantity for {ticker} was zero.")
@@ -280,12 +287,12 @@ async def _queue(
         if indicative_price is None:
             raise ValueError(f"No indicative price available for {ticker}")
         dollar_amount = portfolio.cash_balance * profile["position_size_pct"]
-        quantity = round(dollar_amount / indicative_price, 6)
+        quantity = floor_to_6dp(dollar_amount / indicative_price)
     else:  # sell
         holding = next(
             h for h in portfolio.holdings if h.symbol == ticker and h.asset_type == asset_type
         )
-        quantity = round(holding.quantity * profile["position_size_pct"], 6)
+        quantity = min(floor_to_6dp(holding.quantity * profile["position_size_pct"]), holding.quantity)
 
     if quantity <= 0:
         raise ValueError(f"Computed {side} quantity for {ticker} was zero.")
