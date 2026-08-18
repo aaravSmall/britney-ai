@@ -27,7 +27,8 @@ through the same module-level function, so one monkeypatch covers both.
 """
 
 import asyncio
-from datetime import datetime, timedelta
+import math
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -35,12 +36,18 @@ import agent.run_rebalance as run_rebalance
 import app.services.market_data as market_data
 import app.services.rebalance_service as rebalance_service
 from agent import agent_config
-from agent.classification import StreakResult
+from agent.classification import (
+    ClassificationResult,
+    StreakResult,
+    global_obvious_pool,
+    update_streaks,
+)
 from app.database import SessionLocal
 from app.models import CashLedgerEntry, Portfolio, PortfolioHolding
 from app.services.portfolio_service import queue_pending_trade
 from app.services.rebalance_service import (
     REBALANCE_TARGET_WEIGHTS,
+    effective_target_weights,
     plan_rebalance,
     rebalance_portfolio,
 )
@@ -904,4 +911,118 @@ def test_cycle_isolates_unexpected_sell_failures_and_still_runs_buy_loop_for_eve
         f"\nCycle-resilience regression: sells attempted for {sell_calls} (VOO failed, "
         f"SPY still ran), buy loop ran for {sorted(buy_loop_calls)} despite both forced "
         f"failures.\n--- captured log excerpt ---\n{log_text}"
+    )
+
+
+# ---------------------------------------------------------------------
+# End-to-end: a global-pool ticker's FIRST appearance, wired through the
+# real pipeline — debounce confirmation -> global_obvious_pool() ->
+# effective_target_weights() -> plan_rebalance() -> rebalance_portfolio()
+# -> an actual Trade row. Complements (doesn't replace) two existing,
+# independently-correct-but-never-wired-together tests:
+# test_classification.py's test_discovered_ticker_needs_three_
+# consecutive_passing_days_to_enter_global_pool (proves the 0->1 debounce
+# transition, stops at global_obvious_pool()'s set output) and this
+# file's test_global_obvious_discovered_ticker_redistributes_across_all_
+# three_tiers (proves the redistribution math, but with a literal {"XYZ"}
+# injected directly — never derived from a real debounce run). Neither
+# proves the SEAM between them actually works end to end.
+# ---------------------------------------------------------------------
+
+
+def _classification_result(ticker: str, *, is_obvious: bool) -> ClassificationResult:
+    return ClassificationResult(
+        ticker=ticker, is_obvious=is_obvious,
+        gate_a_passed=is_obvious, gate_a_detail="", gate_b_passed=is_obvious, gate_b_detail="",
+        gate_c_passed=is_obvious, gate_c_detail="",
+        volatility=None, voo_volatility=None, vol_ratio=1.0,
+    )
+
+
+def test_global_pool_first_appearance_flows_end_to_end_into_a_real_trade(client, fixed_prices):
+    """END-TO-END, real DB-backed calls throughout (no mocking of
+    classification/redistribution logic — only the price lookup, same
+    fixed_prices convention every other test in this file uses):
+
+    1. A discovered ticker ("ZQPOOL" — deliberately NOT "XYZ": several
+       other tests in this file and test_classification.py already use
+       "XYZ" against the real, shared, session-scoped ticker_streak_state
+       table with their own dates/streak state, and TickerStreakState is
+       one row per ticker overall, not per-day, so reusing "XYZ" here
+       would collide with whatever streak state an earlier test left
+       behind, order-dependently) passes classification for 3 real
+       consecutive days via the real update_streaks(), same mechanism as
+       test_classification.py's debounce test — CONFIRMING it obvious
+       for the first time ever (bootstrap -> day 1 -> day 2 -> day 3).
+    2. The real global_obvious_pool() is called (not injected) and must
+       now return {"ZQPOOL"}.
+    3. That real result is fed into the real rebalance_portfolio() (->
+       plan_rebalance() -> effective_target_weights()) for conservative.
+    4. A real Trade row must exist for ZQPOOL, filled, tagged
+       source="rebalance", with the quantity effective_target_weights()'s
+       own redistribution math predicts for a fresh $100k all-cash
+       portfolio — proving the full seam, not just each half separately.
+    """
+    ticker = "ZQPOOL"
+    days = [date(2026, 4, i) for i in range(1, 5)]
+    cash_balance = 100_000.0
+    price = fixed_prices.get(ticker, 100.0)  # not in FAKE_PRICES -> the 100.0 default
+
+    db = SessionLocal()
+    try:
+        # Day 0: bootstrap, failing — not in the pool.
+        update_streaks(db, {ticker: _classification_result(ticker, is_obvious=False)}, today=days[0])
+        # Days 1-2 of passing (1/3, 2/3): still mid-debounce, not confirmed.
+        update_streaks(db, {ticker: _classification_result(ticker, is_obvious=True)}, today=days[1])
+        update_streaks(db, {ticker: _classification_result(ticker, is_obvious=True)}, today=days[2])
+        # Day 3 of passing (3/3): NOW confirmed obvious for the first time.
+        streaks = update_streaks(
+            db, {ticker: _classification_result(ticker, is_obvious=True)}, today=days[3]
+        )
+        assert streaks[ticker].consecutive_days == 3
+        assert streaks[ticker].flipped is True
+
+        global_pool = global_obvious_pool(streaks, discovered_tickers={ticker})
+        assert global_pool == {ticker}  # the real 0 -> 1 transition, not injected
+
+        portfolio = _new_agent_portfolio(db, cash_balance=cash_balance)
+        trades = asyncio.run(
+            rebalance_portfolio(
+                db, portfolio, "conservative", global_obvious_discovered=global_pool
+            )
+        )
+
+        # Read every field this test needs while the session is still
+        # open — rebalance_portfolio() commits once per item (VOO, BND,
+        # then XYZ), and SQLAlchemy's default expire_on_commit=True means
+        # each later commit expires the EARLIER items' already-returned
+        # Trade objects too, not just the one just committed. Extracting
+        # plain values now avoids a DetachedInstanceError from touching
+        # those attributes after db.close() below.
+        trade_rows = [(t.symbol, t.status, t.source, t.quantity, t.price) for t in trades]
+    finally:
+        db.close()
+
+    xyz_rows = [row for row in trade_rows if row[0] == ticker]
+    assert len(xyz_rows) == 1  # a real Trade row, for the pool's first-ever member
+    symbol, status, source, quantity, fill_price = xyz_rows[0]
+    assert status == "filled"
+    assert source == "rebalance"
+
+    # Expected quantity per effective_target_weights()'s own real math —
+    # a fresh all-cash portfolio means no clamping, so this is exactly
+    # target_weight * cash_balance / price, floored to 6 decimals.
+    expected_weight = effective_target_weights(
+        "conservative", global_obvious_discovered={ticker}
+    )[ticker]
+    expected_dollars = expected_weight * cash_balance
+    expected_quantity = math.floor((expected_dollars / price) * 1_000_000) / 1_000_000
+    assert quantity == pytest.approx(expected_quantity)
+    assert quantity > 0
+
+    print(
+        f"\nEnd-to-end global-pool regression: {ticker} confirmed obvious after 3 real "
+        f"debounce days, global_obvious_pool()={global_pool}, real Trade filled: "
+        f"{quantity} {symbol} @ ${fill_price:.2f} "
+        f"(expected weight={expected_weight:.4%}, expected quantity={expected_quantity})."
     )
