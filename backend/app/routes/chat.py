@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.ai.chat_engine import chat_reply
 from app.deps import CurrentUser, DbSession
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.portfolio_service import portfolio_summary_text
+from app.services.portfolio_service import get_or_create_portfolio, portfolio_summary_text
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -14,7 +14,8 @@ async def chat(
     db: DbSession,
     user: CurrentUser,
 ) -> ChatResponse:
+    portfolio = get_or_create_portfolio(db, user)
     summary = portfolio_summary_text(db, user)
     msgs = [m.model_dump() for m in body.messages]
-    reply = await chat_reply(user, summary, msgs)
+    reply = await chat_reply(db, user, portfolio, summary, msgs)
     return ChatResponse(reply=reply)
