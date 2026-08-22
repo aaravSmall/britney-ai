@@ -2,98 +2,49 @@ britney.ai — future ideas / plans
 (running notes, not commitments — add/cross off freely)
 
 DATA & BACKEND
-- Real performance history: dashboard's 30-day chart is still a random mock
-  seeded from user id, unrelated to actual trades/holdings. Need a daily
-  snapshot table (portfolio value per user per day) to make it real.
 - Websocket/streaming quotes instead of polling Yahoo/CoinGecko on each
   dashboard load — cheaper and feels more "live".
 - Move off the Yahoo Finance unofficial endpoint before any real launch —
   see docs/TECH_STACK.md for paid alternatives (Alpaca/Polygon/IEX).
-- Trade history / order log screen (right now a fill just mutates
-  cash + holdings, nothing records that the trade happened).
 - Real cash ledger instead of a single cash_balance float (deposits,
-  withdrawals, dividends, fees down the line).
+  withdrawals, dividends, fees down the line). Note: audit showed float
+  drift is negligible (~8.5e-9 at 100k simulated trades) — refactor is for
+  auditability, not precision.
 
 TRADING
-- REMINDER before the agent (prompt 4) starts trading on a schedule:
-  get_or_create_portfolio() is currently only called from build_dashboard's
-  path (via ensure_demo_holdings) and from record_trade_fill itself, but
-  ensure_demo_holdings is NOT called from record_trade_fill — so a
-  portfolio that's never been loaded via /dashboard (pre-existing
-  CORS/first-load timing edge case) can still be traded against, just
-  without demo seed holdings. Before the agent trades on a schedule
-  without a user ever having opened /dashboard first, make
-  record_trade_fill call get_or_create_portfolio() directly (it already
-  does) AND decide whether it should also seed/initialize like
+- REMINDER before the agent starts trading unattended without a user ever
+  having opened /dashboard first: get_or_create_portfolio() is currently
+  only called from build_dashboard's path (via ensure_demo_holdings) and
+  from record_trade_fill itself, but ensure_demo_holdings is NOT called
+  from record_trade_fill — so a portfolio that's never been loaded via
+  /dashboard (pre-existing CORS/first-load timing edge case) can still be
+  traded against, just without demo seed holdings. Need to make
+  record_trade_fill decide whether it should also seed/initialize like
   ensure_demo_holdings does, so a never-loaded portfolio can't cause a
   failed/mysterious agent trade. Flagged 2026-08-04, not yet implemented.
 - Actual Alpaca live/paper order routing (execution.py has a placeholder
   for this — currently everything is simulated locally).
 - Fractional share support / rounding rules for crypto vs stock vs option
-  quantities.
+  quantities. Note: frontend display of fractional crypto quantities was
+  fixed in the Sprint 2 frontend audit (8-decimal trim) — this item is
+  about backend rounding rules across asset classes, still open.
 - Recurring/auto-invest execution (auto_invest_enabled toggle exists but
   nothing runs on a schedule yet).
 
 FRONTEND / UX
 - Holdings detail screen (tap a position -> price history, buy/sell,
-  cost basis, P/L).
+  cost basis, P/L). CC prompt already drafted, not yet run.
 - Notifications (price alerts, trade confirmations, daily digest).
 - Stock search: search any ticker (not just recommended assets), land on a
   detail page with price/chart + company info (name, sector, description,
   market cap, etc.), and buy/sell straight from there. Needs a backend
   endpoint for company fundamentals/profile — current market_data.py only
-  fetches a bare price, not company metadata.
+  fetches a bare price, not company metadata. CC prompt already drafted,
+  not yet run.
 - Onboarding: capture more nuanced risk profile inputs (current fields are
   pretty coarse: risk_tolerance/goals/time_horizon strings).
 - Mobile builds (android/ios folders aren't generated yet — currently
   flutter web only in practice).
-
-AGENT — CRYPTO NEWS
-- INGESTION DONE (2026-08-07): backend/agent/news_ingestion.py now has
-  fetch_crypto_news() (CryptoPanic free tier), symmetric to the existing
-  fetch_news() (Finnhub) — same NewsArticle shape, same SeenArticleStore
-  dedupe discipline, same RateLimiter, same real-vs-mock loud logging.
-  target_crypto_tickers()/target_crypto_tickers_for(tier) mirror the
-  stock equivalents. Verified: mock-mode fallback (no CRYPTOPANIC_API_KEY)
-  produces correctly-labeled placeholder articles for BTC/ETH/SOL, and
-  its output flows through agent/sentiment.py's score_batch() completely
-  unmodified. Real-API verification against CryptoPanic itself (a live
-  key, actual BTC/ETH articles) was NOT done — no key was available at
-  implementation time; do that before relying on this in production.
-- WIRED IN (2026-08-07): agent/decision_loop.py's run_once() now fetches
-  and merges both news_ingestion.fetch_news() (stock) and
-  fetch_crypto_news() (crypto) for the tier's tickers, and _execute()
-  derives real asset_type per-ticker (via a new _ASSET_TYPE_BY_TICKER map
-  built from news_ingestion.TARGET_PORTFOLIOS) instead of hardcoding
-  "stock" — fixes pricing (market_data.get_price_for_holding was already
-  crypto-aware, just never got told a ticker was crypto),
-  execute_trade()'s recorded asset_type, and record_trade_fill's
-  holding-matching, all of which were silently wrong for any crypto trade
-  before this (never triggered in practice since crypto tickers were
-  previously excluded from run_once() entirely). Verified live in mock
-  mode across all three tiers: BTC/ETH/SOL are fetched, scored, and get a
-  real "hold" AgentDecision logged (mock sentiment heuristic reads their
-  headlines as neutral, below every tier's confidence threshold); a
-  forced buy+sell of BTC against the conservative agent portfolio
-  confirmed the full path end-to-end — real CoinGecko pricing, correct
-  fractional quantity, asset_type="crypto" recorded, cash/holdings
-  updated correctly both directions.
-- CORRECTION (2026-08-07): the note below (previously "STILL OPEN") was
-  wrong — investigated and verified run_agent.py does NOT gate polling on
-  is_market_hours(). run_forever()'s while-loop calls _run_all() (which
-  runs decision_loop.run_once() — stock AND crypto tickers alike, no
-  asset-type branching — for every portfolio) unconditionally on every
-  iteration; is_market_hours() is only consulted afterward, to pick the
-  sleep duration before the next iteration (15min market-hours /
-  60min otherwise). So crypto tickers already get polled 24/7, just on
-  the coarser 60min cadence outside 9:30-16:00 ET weekdays, same as
-  stock tickers do. Verified live: forced is_market_hours() to always
-  return False (simulating weekend/after-hours) and ran the real
-  run_forever() loop (sleep constants shrunk 60x/15x purely for a fast
-  test, source unmodified) — BTC/ETH/SOL were fetched/scored/decided on
-  the very first "after-hours/weekend"-logged cycle, and the loop kept
-  firing every cycle thereafter without interruption. No code change
-  needed or made.
 
 AI
 - Stream chat responses instead of waiting for the full completion.
@@ -114,7 +65,8 @@ INFRA
   droplet rebuild takes Postgres down with it).
 - Deploy backend + Postgres somewhere real (see docs/TECH_STACK.md) — the
   agent now has this (docs/DEPLOYMENT.md), the FastAPI web app still doesn't.
-- CI: no tests or lint pipeline exist yet.
+- CI: pytest suite exists now (18 tests, all passing) but nothing runs it
+  automatically — no CI/lint pipeline yet.
 - Alembic migrations instead of relying on create_all (breaks on schema
   changes to existing DBs — currently working around this by deleting
   the local sqlite file).
@@ -126,20 +78,16 @@ MONETIZATION / PRODUCT (loose, unranked)
 
 
 
-On the two disclosed tradeoffs:
+On the one remaining disclosed tradeoff:
 
-1. Options no longer suggestable for high-risk users — CC's right 
-that this path was never grounded before anyway, so you're not losing 
-real functionality, just an ungrounded placeholder. I'd call this a 
-non-issue for now — worth a one-line note in IDEAS.txt if you want 
+Options no longer suggestable for high-risk users — CC's right
+that this path was never grounded before anyway, so you're not losing
+real functionality, just an ungrounded placeholder. I'd call this a
+non-issue for now — worth a one-line note in IDEAS.txt if you want
 options support later, but not worth solving today.
 
-2. Event-loop blocking, now several calls deep — this one I'd take 
-more seriously, but not urgently. It's fine with zero concurrent 
-users (now), but it's the kind of thing that turns into a real bug 
-the moment two people hit /recommendations at once — one user's 
-request blocks everyone else's for ~10s. The likely fix is small 
-(FastAPI runs sync def route handlers in a threadpool automatically, 
-or wrap the blocking calls in run_in_threadpool) but it's app-wide, 
-not specific to this endpoint, so it's a reasonable thing to batch 
-with your Sprint 8-9 bug pass rather than solve mid-sprint-6.
+(Event-loop blocking, the other tradeoff previously noted here, was
+fixed in Sprint 2 — commit 1b64f76, run_in_threadpool wrapping in
+sentiment.py/recommendation_engine.py/chat_engine.py. Verified: 3
+concurrent recommendation requests went from ~12s serialized to ~4s
+concurrent. Removed from open items.)

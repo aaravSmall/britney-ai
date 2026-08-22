@@ -26,3 +26,6 @@ frontend/.flutter-plugins-dependencies
 
 # OS
 .DS_Store
+
+# Local-only deploy target — never commit a real IP here
+backend/deploy/.env.deploy
