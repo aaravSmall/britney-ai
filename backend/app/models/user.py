@@ -27,6 +27,14 @@ class User(Base):
 
     auto_invest_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Display timezone for times shown in the app: either an IANA name
+    # (e.g. "America/Chicago") or the sentinel "device" meaning "render in
+    # whatever timezone the client's device is in" (the default — see
+    # app/routes/settings.py's set_timezone). Distinct from the trading
+    # engine's own market clock (agent/market_hours.py's MARKET_TZ, always
+    # America/New_York regardless of this field).
+    timezone: Mapped[str] = mapped_column(String(64), default="device")
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

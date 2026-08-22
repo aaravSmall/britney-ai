@@ -8,6 +8,7 @@ import '../services/api_service.dart';
 import '../services/auth_controller.dart';
 import '../services/theme_controller.dart';
 import '../services/time_format_controller.dart';
+import '../services/timezone_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/add_auto_invest_sheet.dart';
@@ -224,6 +225,24 @@ class AccountScreen extends StatelessWidget {
                     width: double.infinity,
                     child: _TimeFormatSelector(),
                   ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Icon(Icons.public_rounded,
+                          color: AppTheme.textSecondaryOf(context)),
+                      const SizedBox(width: 16),
+                      Text(
+                        'Timezone',
+                        style:
+                            t.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const SizedBox(
+                    width: double.infinity,
+                    child: _TimezoneSelector(),
+                  ),
                 ],
               ),
             ),
@@ -349,6 +368,109 @@ class _TimeFormatSelector extends StatelessWidget {
   }
 }
 
+/// (IANA id or [kDeviceTimezone], display label). Eastern Time is listed
+/// right under Device since it's the NYSE's own clock — the zone this
+/// trading app's timestamps matter most in — not because it's
+/// alphabetically or geographically special otherwise.
+const List<(String, String)> _timezoneOptions = [
+  (kDeviceTimezone, 'Device (local time)'),
+  ('America/New_York', 'Eastern Time — NYSE'),
+  ('America/Chicago', 'Central Time'),
+  ('America/Denver', 'Mountain Time'),
+  ('America/Los_Angeles', 'Pacific Time'),
+  ('America/Anchorage', 'Alaska Time'),
+  ('Pacific/Honolulu', 'Hawaii Time'),
+  ('UTC', 'UTC'),
+  ('Europe/London', 'London'),
+];
+
+String _timezoneLabel(String zoneId) => _timezoneOptions
+    .firstWhere((o) => o.$1 == zoneId, orElse: () => (zoneId, zoneId))
+    .$2;
+
+/// A tappable row showing the current display timezone; opens
+/// [_openTimezonePicker] to change it. Same "tap to open a picker" shape
+/// as the (currently stub) Currency ListTile below, just made functional
+/// and following the Appearance/Time format card's full-width-selector
+/// layout instead since it lives inside that card, not the plain-ListTile
+/// one.
+class _TimezoneSelector extends StatelessWidget {
+  const _TimezoneSelector();
+
+  @override
+  Widget build(BuildContext context) {
+    final tzController = context.watch<TimezoneController>();
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: () => _openTimezonePicker(context, tzController),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          border: Border.all(color: AppTheme.borderSubtleOf(context)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Expanded(child: Text(_timezoneLabel(tzController.zoneId))),
+            Icon(Icons.expand_more_rounded,
+                size: 20, color: AppTheme.textSecondaryOf(context)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Applies [zoneId] to [controller] immediately (so the whole app's times
+/// update right away, same as every other setting here) and mirrors it to
+/// the account via PATCH /settings/timezone — same "update local state,
+/// best-effort sync to server" split as this screen's auto-invest toggle
+/// (_AutoInvestSection) and dashboard_screen.dart's _toggleAuto.
+Future<void> _openTimezonePicker(
+  BuildContext context,
+  TimezoneController controller,
+) async {
+  final api = context.read<ApiService>();
+  final messenger = ScaffoldMessenger.of(context);
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          for (final option in _timezoneOptions)
+            ListTile(
+              title: Text(option.$2),
+              trailing: option.$1 == controller.zoneId
+                  ? const Icon(Icons.check_rounded, color: AppTheme.accent)
+                  : null,
+              onTap: () async {
+                Navigator.of(sheetContext).pop();
+                if (option.$1 == controller.zoneId) return;
+                await controller.setZone(option.$1);
+                try {
+                  final res =
+                      await api.patch('/settings/timezone', {'timezone': option.$1});
+                  if (res.statusCode < 200 || res.statusCode >= 300) {
+                    messenger.showSnackBar(
+                      const SnackBar(
+                          content: Text('Could not save timezone to your account')),
+                    );
+                  }
+                } catch (_) {
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('Network error saving timezone')),
+                  );
+                }
+              },
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
 const Map<String, String> _intervalLabels = {
   'daily': 'Daily',
   'weekly': 'Weekly',
@@ -450,6 +572,8 @@ class _AutoInvestSectionState extends State<_AutoInvestSection> {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final use24Hour = context.watch<TimeFormatController>().use24Hour;
+    final tzController = context.watch<TimezoneController>();
+    final showEt = tzController.zoneId != 'America/New_York';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -508,9 +632,14 @@ class _AutoInvestSectionState extends State<_AutoInvestSection> {
                       '${_intervalLabels[schedule['interval']] ?? schedule['interval']}',
                     ),
                     subtitle: Text(
-                      schedule['last_executed_at'] == null
-                          ? 'Never run yet'
-                          : 'Last run: ${formatTradeTime(DateTime.parse(schedule['last_executed_at'] as String).toLocal(), use24Hour)}',
+                      () {
+                        final lastExecutedAt = schedule['last_executed_at'] as String?;
+                        if (lastExecutedAt == null) return 'Never run yet';
+                        final utc = DateTime.parse(lastExecutedAt);
+                        final local = toDisplayZone(utc, tzController.location);
+                        return 'Last run: ${formatTradeTime(local, use24Hour)}'
+                            '${showEt ? ' (${formatEasternSuffix(utc, use24Hour)})' : ''}';
+                      }(),
                       style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                     ),
                     trailing: Row(

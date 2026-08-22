@@ -11,6 +11,7 @@ import '../services/api_service.dart';
 import '../services/auth_controller.dart';
 import '../services/portfolio_bus.dart';
 import '../services/time_format_controller.dart';
+import '../services/timezone_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/price_chart.dart';
@@ -237,6 +238,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (meRes.statusCode == 200) {
         final u = jsonDecode(meRes.body) as Map<String, dynamic>;
         setState(() => _auto = u['auto_invest_enabled'] == true);
+        final serverZone = u['timezone'] as String?;
+        if (serverZone != null && mounted) {
+          context.read<TimezoneController>().applyServerValue(serverZone);
+        }
       }
       // Sparse/empty performance history is a valid, expected state (not an
       // error) — a failed fetch just degrades to the same empty-state UI.
@@ -471,8 +476,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final values = [
       for (final p in filtered) (p['total_value'] as num).toDouble(),
     ];
+    final displayZone = context.watch<TimezoneController>().location;
     final times = [
-      for (final p in filtered) DateTime.parse(p['timestamp'] as String).toLocal(),
+      for (final p in filtered)
+        toDisplayZone(DateTime.parse(p['timestamp'] as String), displayZone),
     ];
     final periodChangePct = values.length >= 2 && values.first != 0
         ? (values.last - values.first) / values.first * 100
@@ -1152,13 +1159,18 @@ class _PendingOrderTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
+    final tzController = context.watch<TimezoneController>();
+    final showEt = tzController.zoneId != 'America/New_York';
     final sym = o['symbol'] as String;
     final side = o['side'] as String;
     final qty = (o['quantity'] as num).toDouble();
     final source = o['source'] as String;
     final isAgent = source == 'agent';
-    final scheduledFor = o['scheduled_execution_time'] != null
-        ? DateTime.parse(o['scheduled_execution_time'] as String).toLocal()
+    final scheduledForUtc = o['scheduled_execution_time'] != null
+        ? DateTime.parse(o['scheduled_execution_time'] as String)
+        : null;
+    final scheduledFor = scheduledForUtc != null
+        ? toDisplayZone(scheduledForUtc, tzController.location)
         : null;
 
     final buy = side == 'buy';
@@ -1198,7 +1210,8 @@ class _PendingOrderTile extends StatelessWidget {
         subtitle: Text(
           '$qtyLabel shares'
           '${currentPrice != null ? ' · ~\$${currentPrice!.toStringAsFixed(2)} now' : ''}'
-          '${scheduledFor != null ? ' · queued for ${formatTradeTime(scheduledFor, use24Hour)}' : ''}',
+          '${scheduledFor != null ? ' · queued for ${formatTradeTime(scheduledFor, use24Hour)}' : ''}'
+          '${scheduledForUtc != null && showEt ? ' (${formatEasternSuffix(scheduledForUtc, use24Hour)})' : ''}',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Column(

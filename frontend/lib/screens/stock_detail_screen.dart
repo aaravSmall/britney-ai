@@ -7,6 +7,7 @@ import '../data/chart_kind.dart';
 import '../data/chart_range.dart';
 import '../services/api_service.dart';
 import '../services/time_format_controller.dart';
+import '../services/timezone_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/buy_sell_bottom_sheet.dart';
@@ -427,9 +428,11 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
     final isIntraday = _range == ChartRange.today;
     final use24Hour = context.watch<TimeFormatController>().use24Hour;
 
+    final displayZone = context.watch<TimezoneController>().location;
     final values = [for (final c in _candles) (c['close'] as num).toDouble()];
     final times = [
-      for (final c in _candles) DateTime.parse(c['timestamp'] as String).toLocal(),
+      for (final c in _candles)
+        toDisplayZone(DateTime.parse(c['timestamp'] as String), displayZone),
     ];
 
     return RefreshIndicator(
@@ -635,9 +638,11 @@ class _StockDetailScreenState extends State<StockDetailScreen> {
     final lastPrice = (position?['last_price'] as num?)?.toDouble();
     final isIntraday = _range == ChartRange.today;
 
+    final displayZone = context.watch<TimezoneController>().location;
     final values = [for (final c in _positionCandles) (c['price'] as num).toDouble()];
     final times = [
-      for (final c in _positionCandles) DateTime.parse(c['timestamp'] as String).toLocal(),
+      for (final c in _positionCandles)
+        toDisplayZone(DateTime.parse(c['timestamp'] as String), displayZone),
     ];
 
     return Scaffold(
@@ -1006,7 +1011,10 @@ class _RecentTradeRow extends StatelessWidget {
     final price = (trade['price'] as num?)?.toDouble();
     final source = trade['source'] as String;
     final isAgent = source == 'agent';
-    final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
+    final tzController = context.watch<TimezoneController>();
+    final showEt = tzController.zoneId != 'America/New_York';
+    final timestampUtc = DateTime.parse(trade['timestamp'] as String);
+    final timestamp = toDisplayZone(timestampUtc, tzController.location);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -1042,7 +1050,9 @@ class _RecentTradeRow extends StatelessWidget {
                 Text(
                   isPending
                       ? 'Pending · ${source == 'agent' ? 'Agent' : 'You'}'
-                      : '${formatTradeTime(timestamp, use24Hour)} · ${source == 'agent' ? 'Agent' : 'You'}',
+                      : '${formatTradeTime(timestamp, use24Hour)}'
+                          '${showEt ? ' (${formatEasternSuffix(timestampUtc, use24Hour)})' : ''}'
+                          ' · ${source == 'agent' ? 'Agent' : 'You'}',
                   style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
                 ),
               ],

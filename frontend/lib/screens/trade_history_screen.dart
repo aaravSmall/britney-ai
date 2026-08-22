@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../services/api_service.dart';
 import '../services/time_format_controller.dart';
+import '../services/timezone_controller.dart';
 import '../theme/app_theme.dart';
 import '../utils/format.dart';
 import '../widgets/trade_rationale_sheet.dart';
@@ -295,6 +296,8 @@ class _TradeTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Theme.of(context).textTheme;
     final use24Hour = context.watch<TimeFormatController>().use24Hour;
+    final tzController = context.watch<TimezoneController>();
+    final showEt = tzController.zoneId != 'America/New_York';
 
     final symbol = trade['symbol'] as String;
     final assetType = trade['asset_type'] as String;
@@ -307,9 +310,13 @@ class _TradeTile extends StatelessWidget {
     // TradeOut's docstring — so this must stay nullable rather than the
     // unconditional `as num` cast used everywhere else in this file.
     final price = (trade['price'] as num?)?.toDouble();
-    final timestamp = DateTime.parse(trade['timestamp'] as String).toLocal();
-    final scheduledFor = trade['scheduled_execution_time'] != null
-        ? DateTime.parse(trade['scheduled_execution_time'] as String).toLocal()
+    final timestampUtc = DateTime.parse(trade['timestamp'] as String);
+    final timestamp = toDisplayZone(timestampUtc, tzController.location);
+    final scheduledForUtc = trade['scheduled_execution_time'] != null
+        ? DateTime.parse(trade['scheduled_execution_time'] as String)
+        : null;
+    final scheduledFor = scheduledForUtc != null
+        ? toDisplayZone(scheduledForUtc, tzController.location)
         : null;
     final isAgent = source == 'agent';
 
@@ -340,7 +347,9 @@ class _TradeTile extends StatelessWidget {
           isPending
               ? '$qtyLabel $assetType · Queued for '
                   '${scheduledFor != null ? formatTradeTime(scheduledFor, use24Hour) : '9:30 AM ET open'}'
-              : '$qtyLabel $assetType @ \$${price!.toStringAsFixed(2)} · ${formatTradeTime(timestamp, use24Hour)}',
+                  '${scheduledForUtc != null && showEt ? ' (${formatEasternSuffix(scheduledForUtc, use24Hour)})' : ''}'
+              : '$qtyLabel $assetType @ \$${price!.toStringAsFixed(2)} · ${formatTradeTime(timestamp, use24Hour)}'
+                  '${showEt ? ' (${formatEasternSuffix(timestampUtc, use24Hour)})' : ''}',
           style: t.bodySmall?.copyWith(color: AppTheme.textSecondaryOf(context)),
         ),
         trailing: Column(

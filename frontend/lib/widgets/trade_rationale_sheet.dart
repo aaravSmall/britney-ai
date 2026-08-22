@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_service.dart';
+import '../services/timezone_controller.dart';
 import '../theme/app_theme.dart';
+import '../utils/format.dart' show toDisplayZone;
 
 const List<String> _monthAbbr = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -255,7 +257,10 @@ class _ArticleCitationCard extends StatelessWidget {
     final sentiment = article['sentiment'] as String? ?? 'neutral';
     final confidence = (article['confidence'] as num?)?.toDouble() ?? 0.0;
     final reasoning = article['reasoning'] as String? ?? '';
-    final publishedAt = DateTime.tryParse(article['published_at'] as String? ?? '')?.toLocal();
+    final publishedAtUtc = DateTime.tryParse(article['published_at'] as String? ?? '');
+    final publishedAt = publishedAtUtc != null
+        ? toDisplayZone(publishedAtUtc, context.watch<TimezoneController>().location)
+        : null;
 
     final sentimentColor = sentiment == 'bullish'
         ? AppTheme.accent
