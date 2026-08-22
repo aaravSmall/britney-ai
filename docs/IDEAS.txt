@@ -51,6 +51,17 @@ AI
 - Let recommendations reference the user's *actual* current holdings
   (right now it's generated independent of the portfolio).
 - Guardrails/eval pass on recommendation output before showing it.
+- Discovery gate (b)'s company-name alias table: two real rejections
+  (2026-08-17/08-20) are the SAME real company/ticker as the LLM claimed
+  but score zero-to-borderline token overlap for reasons no
+  suffix-stripping fixes — RTX (LLM said "Raytheon Technologies
+  Corporation", Yahoo's quote is now "RTX Corporation" post-2023 rename)
+  and 2222.SR (LLM said "Saudi Aramco", Yahoo's formal legal name is
+  "Saudi Arabian Oil Company"). Deliberately not solved by the
+  2026-08-22 suffix-list fix (see
+  memory/project_discovery_gateb_false_rejects.md) — needs a real
+  alias/rename table, a separate, larger feature, not a normalization
+  tweak.
 
 INFRA
 - PROMOTION CANDIDATE (flagged 2026-08-05): the trading agent's droplet

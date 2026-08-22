@@ -456,10 +456,19 @@ async def extract_companies_batch(
 # Tokens dropped when normalizing a company name for fuzzy matching —
 # corporate suffixes and filler words that would otherwise make
 # "Apple Inc." and "Apple Corp" look less similar than they are.
+#
+# "ag"/"aktiengesellschaft" added 2026-08-22 after a real production false
+# rejection (SIEGY: LLM said "Siemens AG", Yahoo's quote says "Siemens
+# Aktiengesellschaft" — AG is the standard abbreviation for
+# Aktiengesellschaft, not a naming error). Deliberately NOT extended with
+# other countries' legal-form suffixes (GmbH, SA, NV, KK, etc.) — none of
+# those have been observed in a real rejection yet; add one only once a
+# real case like this shows up for it, per the same reasoning that added
+# "ag" here instead of speculatively covering every jurisdiction up front.
 _SUFFIX_TOKENS = {
     "inc", "incorporated", "corp", "corporation", "co", "company",
     "ltd", "limited", "plc", "llc", "the", "group", "holdings",
-    "class", "a", "b",
+    "class", "a", "b", "ag", "aktiengesellschaft",
 }
 
 

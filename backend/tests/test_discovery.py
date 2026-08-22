@@ -60,6 +60,23 @@ from app.services import discovery_service
         # name written as one word by one source, multiple by the other.
         ("JP Morgan Chase & Co.", "JPMorgan Chase & Co.", True),
         ("ExxonMobil Holdings Corporation", "Exxon Mobil Corporation", True),
+        # SIEGY: real false rejection (2026-08-19), fixed by adding
+        # "ag"/"aktiengesellschaft" to _SUFFIX_TOKENS — AG is the standard
+        # abbreviation for Aktiengesellschaft, not a naming error.
+        ("Siemens Aktiengesellschaft", "Siemens AG", True),
+        # RR/PARA: real TRUE rejections (2026-08-17, 2026-08-20) — the LLM
+        # named a real company but guessed the wrong ticker for it. Must
+        # not flip after the suffix-list change above.
+        ("Richtech Robotics Inc.", "Rolls-Royce Holdings plc", False),
+        ("Banzai International, Inc.", "Paramount Global", False),
+        # RTX/2222.SR: real rejections (2026-08-17, 2026-08-20) that ARE
+        # the same company as the ticker (a 2023 corporate rename; a brand
+        # name vs. formal legal name) but score zero/borderline token
+        # overlap for reasons no suffix-stripping fixes — deliberately
+        # left rejected here. Fixing these needs a company alias/rename
+        # table, a separate, larger feature — see docs/IDEAS.txt.
+        ("RTX Corporation", "Raytheon Technologies Corporation", False),
+        ("Saudi Arabian Oil Company", "Saudi Aramco", False),
     ],
 )
 def test_company_name_matches(quote_name, claimed_name, expected):
