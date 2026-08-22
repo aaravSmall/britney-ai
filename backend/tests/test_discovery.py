@@ -54,6 +54,12 @@ from app.services import discovery_service
         ("Apple Inc.", "Microsoft Corporation", False),
         ("", "Apple Inc.", False),
         ("Apple Inc.", "", False),
+        # Real false rejections caught live in production (2026-08-22, see
+        # docs/OVERVIEW.md's "AI model performance report" and
+        # memory/project_discovery_gateb_false_rejects.md) — a compound
+        # name written as one word by one source, multiple by the other.
+        ("JP Morgan Chase & Co.", "JPMorgan Chase & Co.", True),
+        ("ExxonMobil Holdings Corporation", "Exxon Mobil Corporation", True),
     ],
 )
 def test_company_name_matches(quote_name, claimed_name, expected):

@@ -463,12 +463,22 @@ _SUFFIX_TOKENS = {
 }
 
 
-def _normalize_company_name(name: str) -> set[str]:
+def _normalize_company_name(name: str) -> list[str]:
     """Lowercase, strip punctuation, and drop common corporate-suffix/
     filler tokens so "Apple Inc." and "apple" tokenize to the same
-    {"apple"} set."""
+    ["apple"] list. Order-preserving (a list, not a set) so callers that
+    care about word order — see the squashed-string check below — can
+    still get at it; token-overlap comparisons just wrap it in a set."""
     cleaned = re.sub(r"[^\w\s]", " ", name.lower())
-    return {t for t in cleaned.split() if t and t not in _SUFFIX_TOKENS}
+    return [t for t in cleaned.split() if t and t not in _SUFFIX_TOKENS]
+
+
+# Minimum length (after squashing all tokens together with no spaces) for
+# the compound-name shortcut in company_name_matches() below to fire.
+# Guards against a coincidental substring match between two short,
+# unrelated squashed names (e.g. a 2-3 char ticker-ish word) — real
+# compound company names are comfortably longer than this in practice.
+_MIN_SQUASHED_LEN_FOR_SUBSTRING_MATCH = 4
 
 
 def company_name_matches(quote_name: str, claimed_name: str, *, threshold: float = 0.5) -> bool:
@@ -493,12 +503,32 @@ def company_name_matches(quote_name: str, claimed_name: str, *, threshold: float
     failure mode this gate exists to catch, and it was caught by a real
     test case (tests/test_discovery.py) hitting exactly this ratio
     before this was changed from `>=` to `>`.
+
+    Before falling back to token overlap, also check the two names with
+    every token squashed together (no spaces): this catches a compound
+    name written as one word by one source and multiple words by the
+    other — "JPMorgan Chase & Co." (LLM) vs. Yahoo's "JP Morgan Chase &
+    Co.", or "ExxonMobil Holdings Corporation" (Yahoo) vs. "Exxon Mobil
+    Corporation" (LLM) — both real false rejections caught live in
+    production (2026-08-22) before this shortcut existed: token overlap
+    alone sees "jpmorgan"/"chase" vs. "jp"/"morgan"/"chase" as only a
+    partial (0.5) overlap, at or below threshold, even though squashing
+    both down to "jpmorganchase" shows they're the same name.
     """
     quote_tokens = _normalize_company_name(quote_name)
     claimed_tokens = _normalize_company_name(claimed_name)
     if not quote_tokens or not claimed_tokens:
         return False
-    overlap = len(quote_tokens & claimed_tokens)
+
+    quote_squashed = "".join(quote_tokens)
+    claimed_squashed = "".join(claimed_tokens)
+    if quote_squashed == claimed_squashed or (
+        min(len(quote_squashed), len(claimed_squashed)) >= _MIN_SQUASHED_LEN_FOR_SUBSTRING_MATCH
+        and (quote_squashed in claimed_squashed or claimed_squashed in quote_squashed)
+    ):
+        return True
+
+    overlap = len(set(quote_tokens) & set(claimed_tokens))
     smaller = min(len(quote_tokens), len(claimed_tokens))
     return (overlap / smaller) > threshold
 
