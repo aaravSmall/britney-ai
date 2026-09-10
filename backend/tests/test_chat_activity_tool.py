@@ -14,6 +14,7 @@ real DB session and a mocked stock_data.history() (no live network call).
 
 import asyncio
 import json
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -29,10 +30,19 @@ from app.services.portfolio_service import get_or_create_portfolio, record_trade
 
 
 def test_activity_report_includes_trades_ledger_and_price_move(client, monkeypatch):
+    # Relative to "now" (5 days back), not a fixed calendar date — the
+    # report's default window is [utcnow() - 14 days, utcnow()], so a
+    # hardcoded date eventually rolls out of range as real time passes
+    # (this is exactly what broke here: a candle pinned to 2026-08-19
+    # fell outside the window once "now" moved past 2026-09-02). 5 days
+    # keeps it safely inside the 14-day window regardless of when the
+    # suite runs.
+    candle_timestamp = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%dT00:00:00+00:00")
+
     async def _fake_history(ticker, range_key):
         return [
             {
-                "timestamp": "2026-08-19T00:00:00+00:00",
+                "timestamp": candle_timestamp,
                 "open": 100.0,
                 "high": 101.0,
                 "low": 98.0,
