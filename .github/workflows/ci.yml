@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend tests (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No secrets/env vars are provisioned here on purpose: every
+      # external-service setting (OPENAI_API_KEY, FINNHUB_API_KEY,
+      # CRYPTOPANIC_API_KEY, ALPACA_*, FIREBASE_CREDENTIALS_PATH) defaults
+      # to an empty string with a working offline-mock fallback baked
+      # into the app itself, and tests/conftest.py overrides
+      # DATABASE_URL to an isolated temp SQLite file and sets
+      # AUTH_DISABLED=true before app.main is ever imported. See
+      # docs/OVERVIEW.md's CI-readiness investigation for the full
+      # audit this was confirmed against.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # tests/test_stocks.py and tests/test_favorites.py deliberately hit
+      # real Yahoo Finance endpoints (no mocking layer exists for them —
+      # see their own module docstrings). Left unmodified here as an
+      # accepted tradeoff: real coverage over hermetic isolation, at the
+      # cost of occasional flakiness if Yahoo rate-limits a runner's IP.
+      - name: Run tests
+        run: pytest
+
+  frontend:
+    name: Frontend tests + build (flutter)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned explicitly — no SDK version pin exists anywhere else in
+      # the repo (no .fvmrc, only a loose ">=3.3.0 <4.0.0" Dart
+      # constraint in pubspec.yaml), so floating to the action's default
+      # would silently drift from the 3.41.6 stable used in local dev.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.6"
+          channel: "stable"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+
+      - name: Build web
+        run: flutter build web
